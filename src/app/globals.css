@@ -1,26 +1,160 @@
 @import "tailwindcss";
 
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
-}
-
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+  --app-bg: #d1d7db;
+  --panel: #ffffff;
+  --panel-header: #f0f2f5;
+  --panel-hover: #f5f6f6;
+  --panel-active: #f0f2f5;
+  --chat-bg: #efeae2;
+  --chat-pattern: rgba(0, 0, 0, 0.035);
+  --bubble-in: #ffffff;
+  --bubble-out: #d9fdd3;
+  --accent: #00a884;
+  --accent-strong: #008069;
+  --accent-soft: #d9fdd3;
+  --text: #111b21;
+  --text-2: #3b4a54;
+  --muted: #667781;
+  --border: #e9edef;
+  --input: #ffffff;
+  --tick-read: #53bdeb;
+  --deleted-bg: #fff1f2;
+  --deleted-border: #f15c6d;
+  --deleted-text: #c0263a;
+  --edited: #b38600;
+  --quote-bg: rgba(0, 0, 0, 0.05);
+  --system-bubble: #ffffff;
+  --shadow: 0 1px 0.5px rgba(11, 20, 26, 0.13);
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
+    --app-bg: #0c1317;
+    --panel: #111b21;
+    --panel-header: #202c33;
+    --panel-hover: #202c33;
+    --panel-active: #2a3942;
+    --chat-bg: #0b141a;
+    --chat-pattern: rgba(255, 255, 255, 0.025);
+    --bubble-in: #202c33;
+    --bubble-out: #005c4b;
+    --accent: #00a884;
+    --accent-strong: #00a884;
+    --accent-soft: #0a332c;
+    --text: #e9edef;
+    --text-2: #d1d7db;
+    --muted: #8696a0;
+    --border: #222d34;
+    --input: #2a3942;
+    --tick-read: #53bdeb;
+    --deleted-bg: #3a1d23;
+    --deleted-border: #f15c6d;
+    --deleted-text: #ff8a98;
+    --edited: #e3b341;
+    --quote-bg: rgba(0, 0, 0, 0.18);
+    --system-bubble: #182229;
+    --shadow: 0 1px 0.5px rgba(11, 20, 26, 0.4);
   }
 }
 
+@theme inline {
+  --color-app: var(--app-bg);
+  --color-panel: var(--panel);
+  --color-panel-header: var(--panel-header);
+  --color-panel-hover: var(--panel-hover);
+  --color-panel-active: var(--panel-active);
+  --color-chat: var(--chat-bg);
+  --color-bubble-in: var(--bubble-in);
+  --color-bubble-out: var(--bubble-out);
+  --color-accent: var(--accent);
+  --color-accent-strong: var(--accent-strong);
+  --color-accent-soft: var(--accent-soft);
+  --color-fg: var(--text);
+  --color-fg-2: var(--text-2);
+  --color-muted: var(--muted);
+  --color-line: var(--border);
+  --color-input: var(--input);
+  --color-tick: var(--tick-read);
+  --color-deleted: var(--deleted-bg);
+  --color-deleted-border: var(--deleted-border);
+  --color-deleted-fg: var(--deleted-text);
+  --color-edited: var(--edited);
+  --color-quote: var(--quote-bg);
+  --color-system: var(--system-bubble);
+}
+
+html,
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  height: 100%;
+}
+
+body {
+  background: var(--app-bg);
+  color: var(--text);
+  font-family: "Segoe UI", "Helvetica Neue", Helvetica, "Lucida Grande", Arial, Ubuntu, Cantarell, "Fira Sans", sans-serif;
+  font-size: 14.2px;
+  -webkit-font-smoothing: antialiased;
+}
+
+.chat-wallpaper {
+  background-color: var(--chat-bg);
+  background-image: radial-gradient(var(--chat-pattern) 1.2px, transparent 1.2px),
+    radial-gradient(var(--chat-pattern) 1.2px, transparent 1.2px);
+  background-size: 28px 28px;
+  background-position: 0 0, 14px 14px;
+}
+
+.scroll-thin {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(134, 150, 160, 0.4) transparent;
+}
+
+.bubble {
+  box-shadow: var(--shadow);
+}
+
+/* little tails on the first bubble of a group */
+.bubble-tail-in::before,
+.bubble-tail-out::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  width: 8px;
+  height: 13px;
+}
+.bubble-tail-in::before {
+  left: -8px;
+  background: var(--bubble-in);
+  clip-path: polygon(0 0, 100% 0, 100% 100%);
+}
+.bubble-tail-out::before {
+  right: -8px;
+  background: var(--bubble-out);
+  clip-path: polygon(0 0, 100% 0, 0 100%);
+}
+.bubble-deleted.bubble-tail-in::before,
+.bubble-deleted.bubble-tail-out::before {
+  background: var(--deleted-bg);
+}
+
+@keyframes pulse-ring {
+  0% { transform: scale(0.9); opacity: 0.8; }
+  100% { transform: scale(1.4); opacity: 0; }
+}
+.rec-dot::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 9999px;
+  background: #f15c6d;
+  animation: pulse-ring 1.2s ease-out infinite;
+}
+
+@keyframes flash {
+  0%, 100% { background-color: transparent; }
+  30% { background-color: rgba(0, 168, 132, 0.18); }
+}
+.flash {
+  animation: flash 1.6s ease-in-out;
 }
