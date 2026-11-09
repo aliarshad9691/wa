@@ -1,6 +1,6 @@
 import "server-only";
 import { jidNormalizedUser, isLidUser, isPnUser, isJidGroup } from "baileys";
-import { db, kvGet, type ChatRow, type MessageRow } from "../db";
+import { db, kvGet, kvSet, type ChatRow, type MessageRow } from "../db";
 import type { ParsedMessage } from "./parse";
 
 /* ------------------------------------------------------------------ JIDs */
@@ -142,7 +142,14 @@ export interface ChatListItem {
   } | null;
 }
 
-export function listChats(): ChatListItem[] {
+/** Chat ids of filtered numbers (phone JIDs and any LIDs mapped to them). These chats are hidden. */
+const HIDDEN_SQL = `SELECT pn FROM filtered_numbers UNION SELECT l.lid FROM lid_map l JOIN filtered_numbers f ON f.pn = l.pn`;
+
+/**
+ * Chats for the sidebar. Filtered numbers' chats are left out, unless `hidden` is true, which
+ * returns only those (shown when the secret search code is typed).
+ */
+export function listChats(opts: { hidden?: boolean } = {}): ChatListItem[] {
   const rows = db
     .prepare(
       `SELECT c.*, m.id AS m_id, m.from_me AS m_from_me, m.type AS m_type, m.text AS m_text, m.status AS m_status,
@@ -152,6 +159,7 @@ export function listChats(): ChatListItem[] {
          SELECT rowid FROM messages WHERE chat_id = c.id AND type != 'system' ORDER BY ts DESC LIMIT 1
        )
        WHERE c.id NOT LIKE '%@broadcast' AND c.id NOT LIKE '%@newsletter'
+         AND c.id ${opts.hidden ? "IN" : "NOT IN"} (${HIDDEN_SQL})
        ORDER BY c.pinned DESC, c.last_ts DESC`,
     )
     .all() as (ChatRow & {
@@ -322,7 +330,7 @@ export function findMessageById(id: string) {
 
 export function listDeleted(limit = 200) {
   return (
-    db.prepare(`SELECT ${COLS} FROM messages WHERE is_deleted = 1 ORDER BY deleted_at DESC LIMIT ?`).all(limit) as MessageRow[]
+    db.prepare(`SELECT ${COLS} FROM messages WHERE is_deleted = 1 AND chat_id NOT IN (${HIDDEN_SQL}) ORDER BY deleted_at DESC LIMIT ?`).all(limit) as MessageRow[]
   ).map(toDTO);
 }
 
@@ -330,7 +338,8 @@ export function searchMessages(q: string, limit = 50) {
   return (
     db
       .prepare(
-        `SELECT ${COLS} FROM messages WHERE text LIKE ? ESCAPE '\\' AND type != 'system' ORDER BY ts DESC LIMIT ?`,
+        `SELECT ${COLS} FROM messages WHERE text LIKE ? ESCAPE '\\' AND type != 'system' AND chat_id NOT IN (${HIDDEN_SQL})
+         ORDER BY ts DESC LIMIT ?`,
       )
       .all(`%${q.replace(/[\\%_]/g, (c) => "\\" + c)}%`, limit) as MessageRow[]
   ).map(toDTO);
@@ -547,4 +556,31 @@ export function insertSystemMessage(chatId: string, id: string, ts: number, text
     `INSERT OR IGNORE INTO messages(chat_id, id, from_me, ts, type, text, status) VALUES(?, ?, 0, ?, 'system', ?, 2)`,
   ).run(chatId, id, ts, text);
   return getMessage(chatId, id);
+}
+
+/* ------------------------------------------------------------ alerts */
+
+/** WhatsApp message sent to an alert number when a filtered (hidden) number messages me. */
+export interface AlertSettings {
+  /** Phone-number JID to alert, or null when alerts are off. */
+  phone: string | null;
+  /** Generic one-liner; never includes the received message. */
+  text: string;
+  /** Minimum minutes between alerts, so a burst of messages sends one alert. 0 = every message. */
+  cooldownMin: number;
+}
+
+export const DEFAULT_ALERT_TEXT = "You have a new message waiting in Chat Mirror.";
+
+export function getAlertSettings(): AlertSettings {
+  const s = kvGet<Partial<AlertSettings>>("alertSettings") || {};
+  return {
+    phone: s.phone || null,
+    text: s.text?.trim() || DEFAULT_ALERT_TEXT,
+    cooldownMin: typeof s.cooldownMin === "number" ? s.cooldownMin : 5,
+  };
+}
+
+export function setAlertSettings(s: AlertSettings) {
+  kvSet("alertSettings", s);
 }

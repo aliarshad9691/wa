@@ -75,8 +75,8 @@ export default function FilteredNumbers() {
       </h2>
       <p className="mb-4 text-[13px] leading-5 text-muted">
         Calls from these numbers are rejected immediately. <b>New</b> messages in these chats, theirs and the ones you
-        send, are saved here, then deleted for you on WhatsApp so they don&apos;t show on your phone. They still see
-        everything. Messages from before you added the number are left as they are.
+        send from this app, are saved here, then deleted for you on WhatsApp so they don&apos;t show on your phone. They still see
+        everything. Messages you send from your phone, and anything from before you added the number, are left as they are.
       </p>
 
       <form onSubmit={add} className="mb-4 flex flex-col gap-2 sm:flex-row">

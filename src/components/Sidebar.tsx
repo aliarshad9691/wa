@@ -32,10 +32,15 @@ export default function Sidebar({
   const [found, setFound] = useState<Message[]>([]);
   const [deleted, setDeleted] = useState<Message[] | null>(null);
 
-  const results = query.trim().length >= 2 ? found : [];
-  const chatName = useMemo(() => new Map(chats.map((c) => [c.id, c.name])), [chats]);
+  // Chats of filtered numbers, returned by the server only when the query is the secret code.
+  const [hidden, setHidden] = useState<{ q: string; chats: ChatItem[] } | null>(null);
+  const revealed = hidden && hidden.q === query.trim() && hidden.chats.length ? hidden.chats : null;
+
+  const results = query.trim().length >= 2 && !revealed ? found : [];
+  const chatName = useMemo(() => new Map([...chats, ...(revealed || [])].map((c) => [c.id, c.name])), [chats, revealed]);
 
   const visible = useMemo(() => {
+    if (revealed) return revealed;
     const q = query.trim().toLowerCase();
     return chats.filter((c) => {
       if (filter === "unread" && c.unread === 0) return false;
@@ -43,7 +48,26 @@ export default function Sidebar({
       if (!q) return true;
       return c.name.toLowerCase().includes(q) || c.id.includes(q.replace(/[^\d]/g, "") || "\u0000");
     });
-  }, [chats, filter, query]);
+  }, [chats, filter, query, revealed]);
+
+  // Ask the server whether the query unlocks the hidden chats (re-checked as chats change).
+  useEffect(() => {
+    const q = query.trim();
+    if (!q) return;
+    const ctrl = new AbortController();
+    const t = setTimeout(async () => {
+      try {
+        const r = await fetch(`/api/chats/hidden?code=${encodeURIComponent(q)}`, { signal: ctrl.signal, cache: "no-store" });
+        setHidden({ q, chats: ((await r.json()) as { chats: ChatItem[] }).chats || [] });
+      } catch {
+        /* aborted */
+      }
+    }, 250);
+    return () => {
+      clearTimeout(t);
+      ctrl.abort();
+    };
+  }, [query, chats]);
 
   // Full-text search over stored messages.
   useEffect(() => {

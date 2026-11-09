@@ -111,6 +111,9 @@ class WhatsAppManager {
   /** Filtered phone-number JID -> when it was added (unix seconds). Only later messages are removed. */
   private filtered = new Map<string, number>(repo.listFiltered().map((f) => [f.pn, f.created_at]));
   private autoRemoved = new Set<string>();
+  /** Ids of messages sent from this app (not the phone); only these of my own messages are auto-removed. */
+  private sentHere = new Set<string>();
+  private lastAlertAt = 0;
   private rejectedCalls = new Set<string>();
 
   constructor() {
@@ -260,9 +263,9 @@ class WhatsAppManager {
       for (const m of messages) {
         try {
           this.ingestMessage(m, { live: type === "notify" });
-          // Only brand-new messages are auto-removed (incoming, sent from the phone, or our own
-          // sends, which Baileys echoes as "append"); history is never touched.
-          if (type === "notify" || (type === "append" && m.key.fromMe)) void this.maybeAutoRemove(m);
+          // Only brand-new messages are auto-removed: incoming ones, and my own sent from this app
+          // (Baileys echoes those as "append"). Messages I send from the phone and history stay.
+          if ((type === "notify" && !m.key.fromMe) || (type === "append" && m.key.fromMe)) void this.maybeAutoRemove(m);
         } catch (e) {
           logger.error(e, "message ingest failed");
         }
@@ -657,6 +660,7 @@ class WhatsAppManager {
 
   reloadFiltered() {
     this.filtered = new Map(repo.listFiltered().map((f) => [f.pn, f.created_at]));
+    this.markChatsDirty(); // filtered chats are hidden from the sidebar
   }
 
   /** Map any sender id (phone JID, LID, device JID) to its phone-number JID, if we can. */
@@ -703,8 +707,8 @@ class WhatsAppManager {
   }
 
   /**
-   * New message in a chat with a filtered number, either from them or sent by me (from the phone
-   * or this app): make sure it (and its media) is archived here, then "delete for me" on WhatsApp
+   * New message in a chat with a filtered number, either from them or sent by me from this app
+   * (not from the phone): make sure it (and its media) is archived here, then "delete for me" on WhatsApp
    * so it disappears from the phone. The other side still has it. Messages from before the number
    * was added are never touched.
    */
@@ -712,7 +716,7 @@ class WhatsAppManager {
     if (!this.filtered.size || !m.key.id || !m.key.remoteJid) return;
     const fromMe = Boolean(m.key.fromMe);
     const group = isJidGroup(m.key.remoteJid);
-    if (fromMe && group) return; // filtering is per contact; my messages in groups stay
+    if (fromMe && (group || !this.sentHere.has(m.key.id))) return; // only my 1:1 messages sent from this app
     const p = parseMessage(m);
     if (!p || p.control || p.type === "system") return; // reactions, edits, revokes, stubs
     const senderPn = group
@@ -725,6 +729,7 @@ class WhatsAppManager {
     const once = m.key.remoteJid + "|" + m.key.id;
     if (this.autoRemoved.has(once)) return;
     this.autoRemoved.add(once);
+    if (!fromMe) void this.sendFilterAlert();
 
     const chatId = this.chatIdFor(m.key.remoteJid, m.key.remoteJidAlt);
     if (!chatId) return;
@@ -784,6 +789,31 @@ class WhatsAppManager {
     }
   }
 
+  /**
+   * Tell the alert number (Settings > Alerts) that a hidden number wrote. Sends only the configured
+   * generic text, never the received message, and at most once per cooldown.
+   */
+  private async sendFilterAlert() {
+    const a = repo.getAlertSettings();
+    if (!a.phone) return;
+    if (Date.now() - this.lastAlertAt < a.cooldownMin * 60_000) return;
+    this.lastAlertAt = Date.now();
+    try {
+      await this.sendText(a.phone, a.text);
+      console.info("[filter] alert sent");
+    } catch (e) {
+      this.lastAlertAt = 0;
+      logger.warn({ err: (e as Error).message }, "filter alert failed");
+    }
+  }
+
+  /** Settings > Alerts "Send test": sends the alert text now, ignoring the cooldown. */
+  async sendTestAlert() {
+    const a = repo.getAlertSettings();
+    if (!a.phone) throw new Error("Set an alert number first");
+    await this.sendText(a.phone, a.text);
+  }
+
   /* ------------------------------------------------------------ actions */
 
   private requireSock(): WASocket {
@@ -841,6 +871,8 @@ class WhatsAppManager {
       }
     }
     const messageId = generateMessageIDV2(sock.user?.id);
+    this.sentHere.add(messageId);
+    setTimeout(() => this.sentHere.delete(messageId), 10 * 60_000);
     if (media) this.outgoingMedia.set(messageId, media);
     let sent: WAMessage | undefined;
     try {

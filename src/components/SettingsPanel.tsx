@@ -2,6 +2,7 @@
 import { useEffect, useRef, useState } from "react";
 import { ArrowLeft, Database, HardDrive, LoaderCircle, LogOut, RefreshCw, Smartphone } from "lucide-react";
 import FilteredNumbers from "./FilteredNumbers";
+import AlertSettings from "./AlertSettings";
 import Avatar from "./Avatar";
 import type { SessionUser, WAState } from "./types";
 import { phoneOf } from "./util";
@@ -168,6 +169,7 @@ export default function SettingsPanel({ user, wa, onBack }: { user: SessionUser;
         </Section>
 
         <FilteredNumbers />
+        <AlertSettings />
 
         {/* Sync */}
         <Section icon={<Database size={20} />} title="Message archive (SQLite)">
