@@ -2,7 +2,7 @@ import type { Metadata, Viewport } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Chat Mirror",
+  title: "Project Alpha",
   description: "Your WhatsApp chats, mirrored and archived.",
 };
 

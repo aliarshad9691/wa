@@ -9,7 +9,7 @@ export default function EmptyPane({ wa, onSettings }: { wa: WAState; onSettings:
       <div className="mb-8 flex h-40 w-40 items-center justify-center rounded-full bg-accent-soft text-accent">
         <Smartphone size={72} strokeWidth={1.2} />
       </div>
-      <h2 className="text-[32px] font-light text-fg-2">Chat Mirror</h2>
+      <h2 className="text-[32px] font-light text-fg-2">Project Alpha</h2>
       <p className="mt-4 max-w-md text-sm leading-6 text-muted">
         {linked
           ? "Send and receive messages from your linked phone. Every message — including ones deleted for everyone — is archived here."

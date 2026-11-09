@@ -210,7 +210,7 @@ export default function SettingsPanel({ user, wa, onBack }: { user: SessionUser;
 
         <form action={signOutAction} className="px-6 py-6">
           <button className="flex items-center gap-3 text-[15px] text-deleted-fg hover:underline">
-            <LogOut size={18} /> Sign out of Chat Mirror
+            <LogOut size={18} /> Sign out of Project Alpha
           </button>
         </form>
       </div>

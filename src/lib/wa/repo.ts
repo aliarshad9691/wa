@@ -570,7 +570,7 @@ export interface AlertSettings {
   cooldownMin: number;
 }
 
-export const DEFAULT_ALERT_TEXT = "You have a new message waiting in Chat Mirror.";
+export const DEFAULT_ALERT_TEXT = "You have a new message waiting in Project Alpha.";
 
 export function getAlertSettings(): AlertSettings {
   const s = kvGet<Partial<AlertSettings>>("alertSettings") || {};

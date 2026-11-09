@@ -38,7 +38,7 @@ export default async function LoginPage({ searchParams }: PageProps<"/login">) {
             </svg>
           </div>
           <div>
-            <h1 className="text-xl font-medium text-fg">Chat Mirror</h1>
+            <h1 className="text-xl font-medium text-fg">Project Alpha</h1>
             <p className="text-sm text-muted">Sign in to see your chats</p>
           </div>
         </div>
