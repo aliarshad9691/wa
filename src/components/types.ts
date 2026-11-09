@@ -40,7 +40,7 @@ export interface Message {
   type: string;
   text: string | null;
   media: null | {
-    status: "none" | "pending" | "ready" | "failed";
+    status: "none" | "pending" | "ready" | "failed" | "skipped";
     mime: string | null;
     size: number | null;
     seconds: number | null;

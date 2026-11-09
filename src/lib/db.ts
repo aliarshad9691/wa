@@ -20,7 +20,7 @@ export type MessageType =
   | "system"
   | "unknown";
 
-export type MediaStatus = "none" | "pending" | "ready" | "failed";
+export type MediaStatus = "none" | "pending" | "ready" | "failed" | "skipped";
 
 export interface MessageRow {
   chat_id: string;

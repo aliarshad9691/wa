@@ -288,6 +288,17 @@ function MediaPlaceholder({ m, onRetry, children }: { m: Message; onRetry: (m: M
           <LoaderCircle size={16} className="animate-spin" /> Saving to storage…
         </span>
       )}
+      {st === "skipped" && (
+        <button
+          onClick={(e) => {
+            e.stopPropagation();
+            onRetry(m);
+          }}
+          className="flex items-center gap-2 rounded-full bg-black/60 px-3 py-2 text-[13px] text-white hover:bg-black/70"
+        >
+          <Download size={15} /> Download {m.media?.size ? `· ${formatBytes(m.media.size)}` : ""}
+        </button>
+      )}
       {st === "failed" && (
         <button
           onClick={(e) => {
@@ -383,9 +394,9 @@ function Body({ m, onRetry, onOpenMedia }: { m: Message; onRetry: (m: Message) =
               <a href={mediaUrl(m.chatId, m.id, true)} className="rounded-full border border-muted/40 p-1.5 text-muted hover:text-fg" title="Download">
                 <Download size={18} />
               </a>
-            ) : m.media?.status === "failed" ? (
-              <button onClick={() => onRetry(m)} className="rounded-full border border-muted/40 p-1.5 text-muted" title="Retry">
-                <RefreshCw size={18} />
+            ) : m.media?.status === "failed" || m.media?.status === "skipped" ? (
+              <button onClick={() => onRetry(m)} className="rounded-full border border-muted/40 p-1.5 text-muted" title={m.media?.status === "skipped" ? "Download" : "Retry"}>
+                {m.media?.status === "skipped" ? <Download size={18} /> : <RefreshCw size={18} />}
               </button>
             ) : (
               <LoaderCircle size={20} className="animate-spin text-muted" />
@@ -444,9 +455,9 @@ function AudioPlayer({ m, onRetry }: { m: Message; onRetry: (m: Message) => void
         >
           {playing ? <Pause size={26} fill="currentColor" /> : <Play size={26} fill="currentColor" />}
         </button>
-      ) : m.media?.status === "failed" ? (
-        <button onClick={() => onRetry(m)} className="shrink-0 text-muted" title="Retry download">
-          <RefreshCw size={22} />
+      ) : m.media?.status === "failed" || m.media?.status === "skipped" ? (
+        <button onClick={() => onRetry(m)} className="shrink-0 text-muted" title={m.media?.status === "skipped" ? "Download" : "Retry download"}>
+          {m.media?.status === "skipped" ? <Download size={22} /> : <RefreshCw size={22} />}
         </button>
       ) : (
         <LoaderCircle size={24} className="shrink-0 animate-spin text-muted" />

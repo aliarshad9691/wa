@@ -49,6 +49,39 @@ export type WAEvent =
   | { type: "history"; chatIds: string[] };
 
 const AUTH_DIR = path.join(DATA_DIR, "wa-auth");
+
+/** Baileys' media download has no timeout; a stalled CDN connection would hold a queue slot forever. */
+function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const t = setTimeout(() => reject(new Error(`media download timed out after ${Math.round(ms / 1000)}s`)), ms);
+    p.then(
+      (v) => {
+        clearTimeout(t);
+        resolve(v);
+      },
+      (e) => {
+        clearTimeout(t);
+        reject(e);
+      },
+    );
+  });
+}
+
+/** 2 minutes, plus a minute per 20 MB for large files. */
+function downloadTimeoutMs(size: number | null) {
+  return 120_000 + Math.ceil((size || 0) / (20 * 1024 * 1024)) * 60_000;
+}
+/**
+ * Media older than this many days is not downloaded automatically (status "skipped"); it can still
+ * be fetched on demand from the chat. 0 downloads everything.
+ */
+const MEDIA_AUTO_DAYS = Number(process.env.MEDIA_AUTO_DAYS ?? 30);
+function mediaCutoffTs() {
+  return MEDIA_AUTO_DAYS > 0 ? Math.floor(Date.now() / 1000) - MEDIA_AUTO_DAYS * 86400 : 0;
+}
+/** Pull the phone's entire history on link. Off by default: the phone then sends only recent chats. */
+const SYNC_FULL_HISTORY = process.env.SYNC_FULL_HISTORY === "1";
+
 const logger = pino({ level: process.env.WA_LOG_LEVEL || "warn" });
 
 class WhatsAppManager {
@@ -75,7 +108,9 @@ class WhatsAppManager {
   private mediaQueued = new Set<string>();
   private mediaActive = 0;
   private wantPairingFor: string | null = null;
-  private filtered = new Set<string>(repo.listFiltered().map((f) => f.pn));
+  /** Filtered phone-number JID -> when it was added (unix seconds). Only later messages are removed. */
+  private filtered = new Map<string, number>(repo.listFiltered().map((f) => [f.pn, f.created_at]));
+  private autoRemoved = new Set<string>();
   private rejectedCalls = new Set<string>();
 
   constructor() {
@@ -135,17 +170,17 @@ class WhatsAppManager {
       /* use the bundled default */
     }
 
-    // WhatsApp currently rejects the "Desktop" companion identity (HTTP 428), so we link as a
-    // browser and ask for full history (requireFullSync); older history can be pulled on demand.
+    // WhatsApp currently rejects the "Desktop" companion identity (HTTP 428), so we link as a browser.
+    // Older history can be pulled on demand from a chat ("Load older messages from phone").
     const browserName = process.env.WA_BROWSER || "Chrome";
     const sock = makeWASocket({
       ...(version ? { version } : {}),
       logger,
       auth: { creds: state.creds, keys: makeCacheableSignalKeyStore(state.keys, logger) },
       browser: Browsers.macOS(browserName),
-      syncFullHistory: true,
+      syncFullHistory: SYNC_FULL_HISTORY,
       markOnlineOnConnect: false,
-      shouldSyncHistoryMessage: () => true,
+      ...(SYNC_FULL_HISTORY ? { shouldSyncHistoryMessage: () => true } : {}),
       generateHighQualityLinkPreview: false,
       getMessage: async (key) => {
         const row = key.id ? repo.findMessageById(key.id) : undefined;
@@ -225,8 +260,9 @@ class WhatsAppManager {
       for (const m of messages) {
         try {
           this.ingestMessage(m, { live: type === "notify" });
-          // Only brand-new incoming messages are auto-removed; history is never touched.
-          if (type === "notify" && !m.key.fromMe) void this.maybeAutoRemove(m);
+          // Only brand-new messages are auto-removed (incoming, sent from the phone, or our own
+          // sends, which Baileys echoes as "append"); history is never touched.
+          if (type === "notify" || (type === "append" && m.key.fromMe)) void this.maybeAutoRemove(m);
         } catch (e) {
           logger.error(e, "message ingest failed");
         }
@@ -316,7 +352,14 @@ class WhatsAppManager {
       logger.warn(e, "group fetch failed");
     }
     // Resume any media that was not yet copied to storage, and give earlier failures one more try.
-    db.prepare("UPDATE messages SET media_status = 'pending' WHERE media_status = 'failed' AND raw IS NOT NULL").run();
+    const cutoff = mediaCutoffTs();
+    db.prepare("UPDATE messages SET media_status = 'skipped' WHERE media_status = 'pending' AND ts < ?").run(cutoff);
+    db.prepare("UPDATE messages SET media_status = 'pending' WHERE media_status = 'failed' AND raw IS NOT NULL AND ts >= ?").run(cutoff);
+    this.mediaQueue = this.mediaQueue.filter((j) => {
+      const keep = (repo.getMessage(j.chatId, j.id)?.ts ?? 0) >= cutoff;
+      if (!keep) this.mediaQueued.delete(j.chatId + "|" + j.id);
+      return keep;
+    });
     for (const r of repo.pendingMedia(20000)) this.enqueueMedia(r.chat_id, r.id);
   }
 
@@ -476,6 +519,9 @@ class WhatsAppManager {
             this.outgoingMedia.delete(row.id);
           });
         }
+      } else if (!opts.live && row.ts < mediaCutoffTs()) {
+        // Old media from history sync: keep the message, fetch the file only when asked.
+        repo.setMedia(chatId, row.id, { status: "skipped" });
       } else {
         this.enqueueMedia(chatId, row.id, opts.live);
       }
@@ -502,9 +548,20 @@ class WhatsAppManager {
     this.emitMessage(row.chat_id, row.id, false);
   }
 
+  /** Move media of the chat being viewed to the front of the queue so it loads first. */
+  prioritizeMedia(chatId: string, ids: string[]) {
+    const want = new Set(ids);
+    const front = this.mediaQueue.filter((j) => j.chatId === chatId && want.has(j.id));
+    if (!front.length) return;
+    this.mediaQueue = [...front, ...this.mediaQueue.filter((j) => !(j.chatId === chatId && want.has(j.id)))];
+  }
+
   enqueueMedia(chatId: string, id: string, priority = false) {
     const k = chatId + "|" + id;
-    if (this.mediaQueued.has(k)) return;
+    if (this.mediaQueued.has(k)) {
+      if (priority) this.prioritizeMedia(chatId, [id]);
+      return;
+    }
     this.mediaQueued.add(k);
     if (priority) this.mediaQueue.unshift({ chatId, id });
     else this.mediaQueue.push({ chatId, id });
@@ -549,20 +606,22 @@ class WhatsAppManager {
     try {
       let buffer: Buffer;
       try {
-        buffer = await downloadMediaMessage(msg, "buffer", {});
+        buffer = await withTimeout(downloadMediaMessage(msg, "buffer", {}), downloadTimeoutMs(row.media_size));
       } catch (e) {
         // Expired CDN links answer 403/404/410. Baileys' own retry checks `error.status`, but its Boom
         // errors carry the code in `output.statusCode`, so we ask the phone to re-upload ourselves.
         const code = (e as Boom).output?.statusCode;
         const sock = this.sock;
         if (!sock || this.state.status !== "open" || (code !== 403 && code !== 404 && code !== 410)) throw e;
-        msg = await sock.updateMediaMessage(msg);
+        // The phone may never answer a re-upload request (media deleted on it, phone offline); without
+        // a timeout this would hold a queue slot forever and, once every slot is held, stall all media.
+        msg = await withTimeout(sock.updateMediaMessage(msg), 60_000);
         db.prepare("UPDATE messages SET raw = ? WHERE chat_id = ? AND id = ?").run(
           Buffer.from(proto.WebMessageInfo.encode(msg).finish()),
           chatId,
           id,
         );
-        buffer = await downloadMediaMessage(msg, "buffer", {});
+        buffer = await withTimeout(downloadMediaMessage(msg, "buffer", {}), downloadTimeoutMs(row.media_size));
       }
       const mime = (row.media_mime || "application/octet-stream").split(";")[0];
       const key = this.mediaKey(row, mime);
@@ -597,7 +656,7 @@ class WhatsAppManager {
   /* ------------------------------------------------- filtered numbers */
 
   reloadFiltered() {
-    this.filtered = new Set(repo.listFiltered().map((f) => f.pn));
+    this.filtered = new Map(repo.listFiltered().map((f) => [f.pn, f.created_at]));
   }
 
   /** Map any sender id (phone JID, LID, device JID) to its phone-number JID, if we can. */
@@ -644,23 +703,40 @@ class WhatsAppManager {
   }
 
   /**
-   * New message from a filtered number: make sure it (and its media) is archived here, then
-   * "delete for me" on WhatsApp so it disappears from the phone. The sender still has it.
+   * New message in a chat with a filtered number, either from them or sent by me (from the phone
+   * or this app): make sure it (and its media) is archived here, then "delete for me" on WhatsApp
+   * so it disappears from the phone. The other side still has it. Messages from before the number
+   * was added are never touched.
    */
   private async maybeAutoRemove(m: WAMessage) {
     if (!this.filtered.size || !m.key.id || !m.key.remoteJid) return;
+    const fromMe = Boolean(m.key.fromMe);
+    const group = isJidGroup(m.key.remoteJid);
+    if (fromMe && group) return; // filtering is per contact; my messages in groups stay
     const p = parseMessage(m);
     if (!p || p.control || p.type === "system") return; // reactions, edits, revokes, stubs
-    const group = isJidGroup(m.key.remoteJid);
     const senderPn = group
       ? await this.toPn(m.key.participant, m.key.participantAlt)
       : await this.toPn(m.key.remoteJid, m.key.remoteJidAlt);
-    if (!senderPn || !this.filtered.has(senderPn)) return;
+    const since = senderPn ? this.filtered.get(senderPn) : undefined;
+    if (!senderPn || since === undefined) return;
+    const ts = Number(m.messageTimestamp?.toString() || Math.floor(Date.now() / 1000));
+    if (ts < since) return;
+    const once = m.key.remoteJid + "|" + m.key.id;
+    if (this.autoRemoved.has(once)) return;
+    this.autoRemoved.add(once);
 
     const chatId = this.chatIdFor(m.key.remoteJid, m.key.remoteJidAlt);
     if (!chatId) return;
     // Media must be safely in storage before WhatsApp forgets it.
     let row = repo.getMessage(chatId, m.key.id);
+    if (row?.media_status === "pending" && (this.storingOwn.has(m.key.id) || this.outgoingMedia.has(m.key.id))) {
+      // Sent from this app: the upload of our own bytes is already under way; wait for it.
+      for (let i = 0; i < 240 && repo.getMessage(chatId, m.key.id)?.media_status === "pending"; i++) {
+        await new Promise((res) => setTimeout(res, 500));
+      }
+      row = repo.getMessage(chatId, m.key.id);
+    }
     if (row?.media_status === "pending") {
       await this.downloadMedia(chatId, m.key.id);
       row = repo.getMessage(chatId, m.key.id);
@@ -670,9 +746,13 @@ class WhatsAppManager {
       }
     }
 
+    if (row && row.media_status !== "none" && row.media_status !== "ready") {
+      logger.warn({ chatId, id: m.key.id }, "auto-remove: media not saved, leaving message on phone");
+      return;
+    }
+
     const sock = this.sock;
     if (!sock) return;
-    const ts = Number(m.messageTimestamp?.toString() || Math.floor(Date.now() / 1000));
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
         // Same patch as chatModify({ deleteForMe }), but with the real sender in group chats
@@ -681,7 +761,7 @@ class WhatsAppManager {
           // `timestamp` (when the action happened) is required: Baileys' chatModify adds it, appPatch doesn't,
           // and the phone silently ignores a delete-for-me action without it.
           syncAction: { timestamp: Date.now(), deleteMessageForMeAction: { deleteMedia: true, messageTimestamp: ts } },
-          index: ["deleteMessageForMe", m.key.remoteJid, m.key.id, "0", group ? m.key.participant || "0" : "0"],
+          index: ["deleteMessageForMe", m.key.remoteJid, m.key.id, fromMe ? "1" : "0", group ? m.key.participant || "0" : "0"],
           type: "regular_high",
           apiVersion: 3,
           operation: proto.SyncdMutation.SyncdOperation.SET,
@@ -689,6 +769,7 @@ class WhatsAppManager {
         console.info("[filter] delete-for-me sent", {
           chat: m.key.remoteJid.split("@")[1],
           group,
+          fromMe,
           participant: group ? (m.key.participant || "").split("@")[1] : null,
           messageTs: ts,
         });
