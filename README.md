@@ -44,6 +44,26 @@ npm run build && npm start   # production
 
 Open the app, sign in, and *Settings* opens with a QR code. On your phone, go to **WhatsApp → Settings → Linked devices → Link a device** and scan it. History starts syncing right away. Media is copied to S3 in the background; the queue is shown in Settings.
 
+## Run with Docker
+
+The repo ships a `Dockerfile` (Node 22, ffmpeg included, runs as a non-root user) and a `compose.yml` meant for a server running the
+[nginx-proxy](https://github.com/nginx-proxy/nginx-proxy) + [acme-companion](https://github.com/nginx-proxy/acme-companion) stack
+(an external Docker network named `proxy`), which routes the domain and issues a Let's Encrypt certificate automatically.
+
+```bash
+cp .env.example .env      # fill it in, and set APP_DOMAIN=chat.example.com
+docker compose up -d --build
+```
+
+- Point the domain's DNS A record at the server **before** starting, so the certificate can be issued.
+- Add `https://<APP_DOMAIN>/api/auth/callback/google` as an authorized redirect URI in Google Cloud Console.
+- `AUTH_URL` is set from `APP_DOMAIN` in `compose.yml`; behind a proxy Next.js otherwise reports a `localhost` URL to Auth.js and Google sign-in fails.
+- The SQLite database and WhatsApp session keys are kept in the `wa-data` volume (`/app/data` in the container). Back it up.
+- The proxy must accept request bodies of at least 110 MB for video uploads (nginx `client_max_body_size`).
+- Logs: `docker compose logs -f app`. Update: `git pull && docker compose up -d --build`.
+
+Without the proxy stack, drop the `networks` block and publish the port instead (`ports: ["3000:3000"]`), and set `AUTH_URL` to the URL you open the app on.
+
 ## How it works
 
 | Piece | File |
