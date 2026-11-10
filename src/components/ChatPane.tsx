@@ -92,10 +92,27 @@ export default function ChatPane({
     };
   }, [api, focus, loadLatest]);
 
-  // per-chat read receipts switch: follow the chat list when it changes (other tab, other device)
+  // per-chat read receipts switch. Load it from the server for this chat: hidden (filtered) chats
+  // and chats opened from search are not in the chat list, so `chat` can be null.
   useEffect(() => {
+    let cancelled = false;
     setReceipts(chat?.readReceipts ?? false);
-  }, [chatId, chat?.readReceipts]);
+    void fetch(`/api/chats/${encodeURIComponent(chatId)}/receipts`)
+      .then((r) => (r.ok ? (r.json() as Promise<{ enabled: boolean }>) : null))
+      .then((d) => {
+        if (d && !cancelled) setReceipts(d.enabled);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- reload per chat; list changes handled below
+  }, [chatId]);
+
+  // follow the chat list when it changes (another tab or device flipped the switch)
+  useEffect(() => {
+    if (chat) setReceipts(chat.readReceipts);
+  }, [chat?.readReceipts]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const toggleReceipts = useCallback(async () => {
     const next = !receipts;
