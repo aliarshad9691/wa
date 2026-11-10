@@ -901,12 +901,41 @@ class WhatsAppManager {
   }
 
   /**
-   * Clears the unread badge in this app only. We deliberately send NO read receipts, so reading a
-   * chat here never turns the sender's ticks blue (they keep seeing grey "delivered" ticks).
+   * Clears the unread badge in this app. Read receipts are sent only for chats whose "Read receipts"
+   * switch is on; otherwise reading a chat here never turns the sender's ticks blue (they keep
+   * seeing grey "delivered" ticks).
    */
   async markRead(chatId: string) {
     repo.upsertChatMeta(chatId, { unread: 0 });
     this.markChatsDirty();
+    await this.sendReadReceipts(chatId);
+  }
+
+  /** Per-chat read receipts switch (Chat header). Turning it on sends receipts for the open chat now. */
+  async setReadReceipts(chatId: string, on: boolean) {
+    repo.setReadReceipts(chatId, on);
+    this.markChatsDirty();
+    if (on) await this.sendReadReceipts(chatId);
+  }
+
+  private async sendReadReceipts(chatId: string) {
+    const chat = repo.getChat(chatId);
+    if (!chat?.read_receipts) return;
+    const sock = this.sock;
+    if (!sock || this.state.status !== "open") return;
+    const rows = repo.pendingReceipts(chatId, chat.receipts_ts);
+    if (!rows.length) return;
+    const group = isJidGroup(chatId);
+    try {
+      // Baileys sends "read" (blue ticks) only if WhatsApp's own Read receipts privacy setting is on;
+      // otherwise it sends "read-self", which the sender never sees.
+      await sock.readMessages(
+        rows.map((r) => ({ remoteJid: chatId, id: r.id, fromMe: false, participant: group ? r.sender_jid || undefined : undefined })),
+      );
+      repo.setReceiptsTs(chatId, rows[rows.length - 1].ts);
+    } catch (e) {
+      logger.warn({ err: (e as Error).message, chatId }, "sending read receipts failed");
+    }
   }
 
   async react(chatId: string, id: string, emoji: string) {

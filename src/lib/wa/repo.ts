@@ -131,6 +131,7 @@ export interface ChatListItem {
   archived: boolean;
   pinned: boolean;
   muted: boolean;
+  readReceipts: boolean;
   last: {
     id: string;
     fromMe: boolean;
@@ -185,6 +186,7 @@ export function listChats(opts: { hidden?: boolean } = {}): ChatListItem[] {
       archived: !!r.archived,
       pinned: !!r.pinned,
       muted: r.muted_until === -1 || r.muted_until > now,
+      readReceipts: !!r.read_receipts,
       last: r.m_id
         ? {
             id: r.m_id,
@@ -201,6 +203,39 @@ export function listChats(opts: { hidden?: boolean } = {}): ChatListItem[] {
 
 export function getChat(id: string) {
   return db.prepare("SELECT * FROM chats WHERE id = ?").get(id) as ChatRow | undefined;
+}
+
+/**
+ * Per-chat read receipts switch. Turning it on starts from my last message in the chat, so the
+ * messages waiting for my reply are the first ones to get blue ticks.
+ */
+export function setReadReceipts(chatId: string, on: boolean) {
+  db.prepare("INSERT INTO chats (id) VALUES (?) ON CONFLICT(id) DO NOTHING").run(chatId);
+  if (on) {
+    const mine = db
+      .prepare("SELECT MAX(ts) AS t FROM messages WHERE chat_id = ? AND from_me = 1")
+      .get(chatId) as { t: number | null };
+    db.prepare("UPDATE chats SET read_receipts = 1, receipts_ts = MAX(receipts_ts, ?) WHERE id = ?").run(mine.t ?? 0, chatId);
+  } else {
+    db.prepare("UPDATE chats SET read_receipts = 0 WHERE id = ?").run(chatId);
+  }
+}
+
+/** Incoming messages in this chat that have not had a read receipt yet (newest `limit`). */
+export function pendingReceipts(chatId: string, since: number, limit = 50) {
+  return (
+    db
+      .prepare(
+        `SELECT id, ts, sender_jid FROM messages
+         WHERE chat_id = ? AND from_me = 0 AND type != 'system' AND ts > ?
+         ORDER BY ts DESC LIMIT ?`,
+      )
+      .all(chatId, since, limit) as { id: string; ts: number; sender_jid: string | null }[]
+  ).reverse();
+}
+
+export function setReceiptsTs(chatId: string, ts: number) {
+  db.prepare("UPDATE chats SET receipts_ts = MAX(receipts_ts, ?) WHERE id = ?").run(ts, chatId);
 }
 
 /* ------------------------------------------------------------- messages */

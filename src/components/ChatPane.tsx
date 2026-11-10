@@ -1,6 +1,6 @@
 "use client";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { ArrowLeft, ChevronDown, LoaderCircle, Search, X } from "lucide-react";
+import { ArrowLeft, CheckCheck, ChevronDown, LoaderCircle, Search, X } from "lucide-react";
 import Avatar from "./Avatar";
 import MessageBubble from "./MessageBubble";
 import Composer from "./Composer";
@@ -40,6 +40,8 @@ export default function ChatPane({
   const [onlyDeleted, setOnlyDeleted] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
   const [askingPhone, setAskingPhone] = useState(false);
+  const [receipts, setReceipts] = useState(chat?.readReceipts ?? false);
+  const [savingReceipts, setSavingReceipts] = useState(false);
   const scroller = useRef<HTMLDivElement>(null);
   const loadingOlder = useRef(false);
   const restore = useRef<{ height: number; top: number } | null>(null);
@@ -89,6 +91,33 @@ export default function ChatPane({
       cancelled = true;
     };
   }, [api, focus, loadLatest]);
+
+  // per-chat read receipts switch: follow the chat list when it changes (other tab, other device)
+  useEffect(() => {
+    setReceipts(chat?.readReceipts ?? false);
+  }, [chatId, chat?.readReceipts]);
+
+  const toggleReceipts = useCallback(async () => {
+    const next = !receipts;
+    setReceipts(next);
+    setSavingReceipts(true);
+    try {
+      const r = await fetch(`/api/chats/${encodeURIComponent(chatId)}/receipts`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled: next }),
+      });
+      if (!r.ok) throw new Error(((await r.json().catch(() => ({}))) as { error?: string }).error || "Could not save");
+      setToast(next ? "Read receipts on: messages you read here turn blue for the sender" : "Read receipts off for this chat");
+      onRead();
+    } catch (e) {
+      setReceipts(!next);
+      setToast((e as Error).message);
+    } finally {
+      setSavingReceipts(false);
+      setTimeout(() => setToast(null), 2500);
+    }
+  }, [chatId, receipts, onRead]);
 
   // mark as read when opened / when new messages arrive while open
   useEffect(() => {
@@ -271,6 +300,24 @@ export default function ChatPane({
             {wa.status !== "open" && " · phone offline (read-only)"}
           </div>
         </div>
+        <button
+          onClick={() => void toggleReceipts()}
+          disabled={savingReceipts}
+          role="switch"
+          aria-checked={receipts}
+          aria-label="Read receipts for this chat"
+          title={
+            receipts
+              ? "Read receipts ON: reading this chat here turns the sender's ticks blue. Click to turn off."
+              : "Read receipts OFF: the sender keeps seeing grey ticks when you read here. Click to turn on."
+          }
+          className={`flex items-center gap-1.5 rounded-full px-2.5 py-1.5 text-[13px] disabled:opacity-60 ${
+            receipts ? "text-tick ring-1 ring-tick/50" : "text-muted hover:bg-black/5 dark:hover:bg-white/5"
+          }`}
+        >
+          <CheckCheck size={17} />
+          <span className="hidden sm:inline">{receipts ? "Blue ticks on" : "Blue ticks off"}</span>
+        </button>
         <button
           onClick={() => setOnlyDeleted((v) => !v)}
           title={onlyDeleted ? "Show all messages" : "Show only deleted messages"}
