@@ -65,6 +65,10 @@ export interface ChatRow {
   muted_until: number;
   avatar_url: string | null;
   avatar_checked_at: number;
+  /** 1 = reading this chat in the app sends read receipts (blue ticks). Off by default. */
+  read_receipts: number;
+  /** Newest incoming message ts a read receipt was already sent for. */
+  receipts_ts: number;
 }
 
 export interface ContactRow {
@@ -164,6 +168,13 @@ function open(): Database.Database {
   const cols = new Set((db.prepare("PRAGMA table_info(messages)").all() as { name: string }[]).map((c) => c.name));
   if (!cols.has("removed_from_phone")) {
     db.exec("ALTER TABLE messages ADD COLUMN removed_from_phone INTEGER NOT NULL DEFAULT 0");
+  }
+  const chatCols = new Set((db.prepare("PRAGMA table_info(chats)").all() as { name: string }[]).map((c) => c.name));
+  if (!chatCols.has("read_receipts")) {
+    db.exec("ALTER TABLE chats ADD COLUMN read_receipts INTEGER NOT NULL DEFAULT 0");
+  }
+  if (!chatCols.has("receipts_ts")) {
+    db.exec("ALTER TABLE chats ADD COLUMN receipts_ts INTEGER NOT NULL DEFAULT 0");
   }
   return db;
 }

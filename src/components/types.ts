@@ -19,6 +19,7 @@ export interface ChatItem {
   archived: boolean;
   pinned: boolean;
   muted: boolean;
+  readReceipts: boolean;
   last: {
     id: string;
     fromMe: boolean;
