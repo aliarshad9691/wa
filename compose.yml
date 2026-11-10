@@ -1,0 +1,33 @@
+# Runs the app behind the server's nginx-proxy + Let's Encrypt stack (external "proxy" network).
+#   cp .env.example .env   # fill it in, including APP_DOMAIN
+#   docker compose up -d --build
+name: wa
+
+services:
+  app:
+    build: .
+    image: wa-app:latest
+    container_name: wa-app
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATA_DIR: /app/data
+      AUTH_TRUST_HOST: "true"
+      # Next.js passes Auth.js an internal localhost URL; pin the public one so OAuth callbacks work.
+      AUTH_URL: https://${APP_DOMAIN}
+      VIRTUAL_HOST: ${APP_DOMAIN:?set APP_DOMAIN in .env}
+      VIRTUAL_PORT: "3000"
+      LETSENCRYPT_HOST: ${APP_DOMAIN}
+    expose:
+      - "3000"
+    volumes:
+      - wa-data:/app/data
+    networks: [proxy]
+    stop_grace_period: 20s
+
+volumes:
+  wa-data:
+
+networks:
+  proxy:
+    external: true
