@@ -84,6 +84,19 @@ const SYNC_FULL_HISTORY = process.env.SYNC_FULL_HISTORY === "1";
 
 const logger = pino({ level: process.env.WA_LOG_LEVEL || "warn" });
 
+/** One delete-for-me action, as WhatsApp indexes it. */
+interface DeleteForMeTarget {
+  jid: string;
+  id: string;
+  fromMe: boolean;
+  participant: string;
+  ts: number;
+}
+/** When to repeat a delete-for-me after the first one (see scheduleDeleteRetries). */
+const DELETE_RETRY_DELAYS_MS = [60_000, 10 * 60_000, 60 * 60_000, 6 * 60 * 60_000];
+/** After a reconnect, deletes for messages newer than this are sent again. */
+const DELETE_RESEND_WINDOW_S = 6 * 3600;
+
 class WhatsAppManager {
   sock: WASocket | null = null;
   bus = new EventEmitter();
@@ -213,6 +226,8 @@ class WhatsAppManager {
         const me = sock.user ? { id: jidNormalizedUser(sock.user.id), name: sock.user.name || null } : null;
         if (me) kvSet("meJid", me.id);
         this.setState({ status: "open", qr: null, pairingCode: null, me, lastError: null });
+        // give the initial app-state sync a moment before patching
+        setTimeout(() => void this.resendRecentDeletes(), 15_000).unref?.();
         void this.afterOpen(sock);
       }
       if (u.connection === "close") {
@@ -756,37 +771,92 @@ class WhatsAppManager {
       return;
     }
 
-    const sock = this.sock;
-    if (!sock) return;
+    if (!this.sock) return;
+    const target: DeleteForMeTarget = {
+      jid: this.deleteIndexJid(m.key.remoteJid, m.key.remoteJidAlt),
+      id: m.key.id,
+      fromMe,
+      participant: group ? m.key.participant || "0" : "0",
+      ts,
+    };
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
-        // Same patch as chatModify({ deleteForMe }), but with the real sender in group chats
-        // (Baileys hard-codes "0", which only addresses 1:1 messages).
-        await sock.appPatch({
-          // `timestamp` (when the action happened) is required: Baileys' chatModify adds it, appPatch doesn't,
-          // and the phone silently ignores a delete-for-me action without it.
-          syncAction: { timestamp: Date.now(), deleteMessageForMeAction: { deleteMedia: true, messageTimestamp: ts } },
-          index: ["deleteMessageForMe", m.key.remoteJid, m.key.id, fromMe ? "1" : "0", group ? m.key.participant || "0" : "0"],
-          type: "regular_high",
-          apiVersion: 3,
-          operation: proto.SyncdMutation.SyncdOperation.SET,
-        });
-        console.info("[filter] delete-for-me sent", {
-          chat: m.key.remoteJid.split("@")[1],
-          group,
-          fromMe,
-          participant: group ? (m.key.participant || "").split("@")[1] : null,
-          messageTs: ts,
-        });
+        await this.sendDeleteForMe(target);
         const updated = repo.markRemovedFromPhone(chatId, m.key.id);
         repo.bumpFiltered(senderPn, "removed_count");
         if (updated) this.emitMessage(chatId, m.key.id, false);
+        this.scheduleDeleteRetries(target);
         return;
       } catch (e) {
         logger.warn({ err: (e as Error).message, attempt }, "auto-remove: delete-for-me failed");
         await new Promise((r) => setTimeout(r, 2000 * (attempt + 1)));
       }
     }
+  }
+
+  /**
+   * Chat id for a delete-for-me index. The phone keys LID-migrated 1:1 chats by their LID, for messages in
+   * both directions, so use the LID whenever we know it (the phone's own deletes look exactly like this).
+   */
+  private deleteIndexJid(remoteJid: string, alt?: string | null): string {
+    if (isJidGroup(remoteJid)) return remoteJid;
+    const n = jidNormalizedUser(remoteJid);
+    if (isLidUser(n)) return n;
+    if (alt && isLidUser(alt)) return jidNormalizedUser(alt);
+    return repo.lidForPn(n) || n;
+  }
+
+  private async sendDeleteForMe(t: DeleteForMeTarget) {
+    const sock = this.sock;
+    if (!sock) throw new Error("not connected");
+    // Same patch as chatModify({ deleteForMe }), but with the real sender in group chats
+    // (Baileys hard-codes "0", which only addresses 1:1 messages).
+    await sock.appPatch({
+      // `timestamp` (when the action happened) is required: Baileys' chatModify adds it, appPatch doesn't,
+      // and the phone silently ignores a delete-for-me action without it.
+      syncAction: { timestamp: Date.now(), deleteMessageForMeAction: { deleteMedia: true, messageTimestamp: t.ts } },
+      index: ["deleteMessageForMe", t.jid, t.id, t.fromMe ? "1" : "0", t.participant],
+      type: "regular_high",
+      apiVersion: 3,
+      operation: proto.SyncdMutation.SyncdOperation.SET,
+    });
+    console.info("[filter] delete-for-me sent", {
+      chat: t.jid.split("@")[1],
+      fromMe: t.fromMe,
+      participant: t.participant === "0" ? null : t.participant.split("@")[1],
+      messageTs: t.ts,
+    });
+  }
+
+  /**
+   * The phone ignores a delete-for-me for a message it has not received yet (asleep, offline, slow push),
+   * and the message then stays when it arrives. Re-sending the same action later fixes that, as the
+   * phone's own repeated deletes show, so repeat it over the next hours.
+   */
+  private scheduleDeleteRetries(t: DeleteForMeTarget) {
+    for (const delay of DELETE_RETRY_DELAYS_MS) {
+      setTimeout(() => {
+        if (this.state.status !== "open") return; // the reconnect sweep covers it
+        this.sendDeleteForMe(t).catch((e) => logger.warn({ err: (e as Error).message }, "auto-remove: retry failed"));
+      }, delay).unref?.();
+    }
+  }
+
+  /** After (re)connecting, re-send delete-for-me for recently removed messages: timers don't survive restarts. */
+  private async resendRecentDeletes() {
+    if (!this.filtered.size) return;
+    const rows = repo.recentlyRemovedFromPhone(Math.floor(Date.now() / 1000) - DELETE_RESEND_WINDOW_S);
+    for (const r of rows) {
+      if (this.state.status !== "open") return;
+      const group = isJidGroup(r.chat_id);
+      const participant = group && r.sender_jid ? repo.lidForPn(r.sender_jid) || r.sender_jid : "0";
+      try {
+        await this.sendDeleteForMe({ jid: this.deleteIndexJid(r.chat_id), id: r.id, fromMe: !!r.from_me, participant, ts: r.ts });
+      } catch (e) {
+        logger.warn({ err: (e as Error).message }, "auto-remove: resend after reconnect failed");
+      }
+    }
+    if (rows.length) console.info("[filter] re-sent delete-for-me after reconnect", { count: rows.length });
   }
 
   /**
