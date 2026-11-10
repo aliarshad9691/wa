@@ -579,6 +579,22 @@ export function bumpFiltered(pn: string, field: "removed_count" | "calls_rejecte
   db.prepare(`UPDATE filtered_numbers SET ${field} = ${field} + 1 WHERE pn = ?`).run(pn);
 }
 
+/** LID for a phone-number JID, if we have learned one. */
+export function lidForPn(pn: string): string | null {
+  const row = db.prepare("SELECT lid FROM lid_map WHERE pn = ? LIMIT 1").get(pn) as { lid: string } | undefined;
+  return row?.lid ?? null;
+}
+
+/** Messages already removed from the phone recently; their delete-for-me is re-sent after a reconnect. */
+export function recentlyRemovedFromPhone(sinceTs: number) {
+  return db
+    .prepare(
+      `SELECT chat_id, id, from_me, sender_jid, ts FROM messages
+       WHERE removed_from_phone = 1 AND ts >= ? ORDER BY ts DESC LIMIT 100`,
+    )
+    .all(sinceTs) as { chat_id: string; id: string; from_me: number; sender_jid: string | null; ts: number }[];
+}
+
 export function markRemovedFromPhone(chatId: string, id: string) {
   db.prepare("UPDATE messages SET removed_from_phone = 1 WHERE chat_id = ? AND id = ?").run(chatId, id);
   return getMessage(chatId, id);
