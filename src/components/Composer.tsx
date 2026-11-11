@@ -241,7 +241,7 @@ export default function Composer({
         </div>
       )}
 
-      <footer className="relative flex min-h-[62px] shrink-0 items-end gap-2 bg-panel-header px-4 py-[9px]">
+      <footer className="relative flex min-h-[62px] shrink-0 items-end gap-1 bg-panel-header px-2 py-[9px] sm:gap-2 sm:px-4">
         {emojiOpen && (
           <div className="absolute bottom-full left-0 z-20 grid w-full grid-cols-10 gap-1 border-t border-line bg-panel p-3 text-2xl sm:grid-cols-[repeat(16,minmax(0,1fr))]">
             {EMOJIS.map((e) => (

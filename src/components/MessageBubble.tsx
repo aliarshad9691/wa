@@ -58,6 +58,21 @@ export interface BubbleProps {
 
 function MessageBubbleImpl({ m, isGroup, first, highlighted, onReply, onReact, onRetry, onOpenMedia, onJump }: BubbleProps) {
   const [menu, setMenu] = useState(false);
+  // touch screens have no hover: a long press opens the message menu
+  const pressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const cancelPress = () => {
+    if (pressTimer.current) clearTimeout(pressTimer.current);
+    pressTimer.current = null;
+  };
+  const startPress = () => {
+    cancelPress();
+    pressTimer.current = setTimeout(() => {
+      pressTimer.current = null;
+      setMenu(true);
+      navigator.vibrate?.(10);
+    }, 450);
+  };
+  useEffect(() => cancelPress, []);
   const [showHistory, setShowHistory] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
 
@@ -93,7 +108,15 @@ function MessageBubbleImpl({ m, isGroup, first, highlighted, onReply, onReact, o
       }`}
     >
       <div
-        className={`relative max-w-[85%] md:max-w-[65%] ${sticker ? "" : `bubble rounded-lg ${bg} ${tail}`} ${
+        onTouchStart={noContent ? undefined : startPress}
+        onTouchMove={cancelPress}
+        onTouchEnd={cancelPress}
+        onTouchCancel={cancelPress}
+        onContextMenu={(e) => {
+          // iOS/Android fire this on long press: use our menu instead of the browser's
+          if (!noContent && window.matchMedia("(hover: none)").matches) e.preventDefault();
+        }}
+        className={`bubble-touch relative max-w-[85%] md:max-w-[65%] ${sticker ? "" : `bubble rounded-lg ${bg} ${tail}`} ${
           m.isDeleted ? "bubble-deleted ring-1 ring-deleted-border/60" : ""
         } ${first && !sticker ? (out ? "rounded-tr-none" : "rounded-tl-none") : ""}`}
       >

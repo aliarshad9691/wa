@@ -31,6 +31,37 @@ export default function ChatApp({ user }: { user: SessionUser }) {
   const refreshTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const router = useRouter();
 
+  // Keep the app frame equal to the visible area (iPhone toolbars, on-screen keyboard). iOS scrolls
+  // the whole page up when the keyboard opens; pinning the frame to visualViewport stops that.
+  useEffect(() => {
+    const vv = window.visualViewport;
+    if (!vv) return;
+    const root = document.documentElement;
+    let frame = 0;
+    const sync = () => {
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(() => {
+        root.style.setProperty("--vvh", `${Math.round(vv.height)}px`);
+        root.style.setProperty("--vv-top", `${Math.round(vv.offsetTop)}px`);
+        root.classList.toggle("kb-open", window.innerHeight - vv.height > 120);
+        if (window.scrollY !== 0 && vv.offsetTop === 0) window.scrollTo(0, 0);
+      });
+    };
+    sync();
+    vv.addEventListener("resize", sync);
+    vv.addEventListener("scroll", sync);
+    window.addEventListener("orientationchange", sync);
+    return () => {
+      cancelAnimationFrame(frame);
+      vv.removeEventListener("resize", sync);
+      vv.removeEventListener("scroll", sync);
+      window.removeEventListener("orientationchange", sync);
+      root.style.removeProperty("--vvh");
+      root.style.removeProperty("--vv-top");
+      root.classList.remove("kb-open");
+    };
+  }, []);
+
   const loadChats = useCallback(async () => {
     const res = await fetch("/api/chats", { cache: "no-store" });
     if (res.status === 401) {
@@ -118,7 +149,7 @@ export default function ChatApp({ user }: { user: SessionUser }) {
   const activeChat = chats.find((c) => c.id === activeId) || null;
 
   return (
-    <div className="flex h-full w-full justify-center xl:py-[19px]">
+    <div className="app-shell flex w-full justify-center">
       <div className="relative flex h-full w-full max-w-[1600px] overflow-hidden bg-panel shadow-[0_6px_18px_rgba(11,20,26,0.05)]">
         {/* Left column */}
         <aside

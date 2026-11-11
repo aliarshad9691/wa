@@ -12,7 +12,10 @@ export default function MediaViewer({ m, title, onClose }: { m: Message; title: 
   }, [onClose]);
 
   return (
-    <div className="fixed inset-0 z-50 flex flex-col bg-panel/95 backdrop-blur-sm" onClick={onClose}>
+    <div
+      className="fixed inset-0 z-50 flex flex-col bg-panel/95 pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)] backdrop-blur-sm"
+      onClick={onClose}
+    >
       <div className="flex h-[59px] shrink-0 items-center justify-between px-4" onClick={(e) => e.stopPropagation()}>
         <div>
           <div className="text-fg">{title}</div>

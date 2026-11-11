@@ -65,7 +65,7 @@ export default function SettingsPanel({ user, wa, onBack }: { user: SessionUser;
     <div className="flex h-full flex-col bg-panel">
       <header className="flex h-[108px] shrink-0 items-end bg-accent-strong px-6 pb-4 text-white dark:bg-panel-header">
         <div className="flex items-center gap-6">
-          <button onClick={onBack} title="Back" className="rounded-full">
+          <button onClick={onBack} title="Back" aria-label="Back" className="-m-2 rounded-full p-2">
             <ArrowLeft size={24} />
           </button>
           <h1 className="text-[19px] font-medium">Settings</h1>

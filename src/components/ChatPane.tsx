@@ -305,8 +305,8 @@ export default function ChatPane({
   return (
     <div className="relative flex h-full w-full flex-col">
       {/* header */}
-      <header className="z-10 flex h-[59px] shrink-0 items-center gap-3 border-l border-line bg-panel-header px-4">
-        <button onClick={onBack} className="text-muted md:hidden" title="Back">
+      <header className="z-10 flex h-[59px] shrink-0 items-center gap-2 border-l border-line bg-panel-header px-3 sm:gap-3 sm:px-4">
+        <button onClick={onBack} className="-m-2 rounded-full p-2 text-muted md:hidden" title="Back" aria-label="Back">
           <ArrowLeft size={22} />
         </button>
         <Avatar id={chatId} isGroup={isGroup} size={40} />
@@ -338,17 +338,22 @@ export default function ChatPane({
         <button
           onClick={() => setOnlyDeleted((v) => !v)}
           title={onlyDeleted ? "Show all messages" : "Show only deleted messages"}
+          aria-label={onlyDeleted ? "Show all messages" : "Show only deleted messages"}
           className={`flex items-center gap-1.5 rounded-full px-3 py-1.5 text-[13px] ${
             onlyDeleted ? "bg-deleted text-deleted-fg ring-1 ring-deleted-border" : "text-muted hover:bg-black/5 dark:hover:bg-white/5"
           }`}
         >
-          {onlyDeleted ? <X size={15} /> : <Search size={15} />}
-          {onlyDeleted ? "Deleted only" : `Deleted${deletedCount ? ` (${deletedCount}+)` : ""}`}
+          {onlyDeleted ? <X size={15} /> : <Search size={17} />}
+          {onlyDeleted ? (
+            "Deleted only"
+          ) : (
+            <span className="hidden sm:inline">{`Deleted${deletedCount ? ` (${deletedCount}+)` : ""}`}</span>
+          )}
         </button>
       </header>
 
       {/* messages */}
-      <div ref={scroller} onScroll={onScroll} className="chat-wallpaper scroll-thin relative min-h-0 flex-1 overflow-y-auto pb-3">
+      <div ref={scroller} onScroll={onScroll} className="chat-wallpaper scroll-thin relative min-h-0 flex-1 overflow-x-hidden overflow-y-auto pb-3">
         {loading ? (
           <div className="flex h-full items-center justify-center text-muted">
             <LoaderCircle className="animate-spin" />
