@@ -50,6 +50,30 @@ export type WAEvent =
 
 const AUTH_DIR = path.join(DATA_DIR, "wa-auth");
 
+/** Id of the most recently created app-state sync key the phone has shared with us (by its own timestamp). */
+function newestAppStateKeyId(): string | null {
+  let best: { id: string; ts: number } | null = null;
+  let files: string[] = [];
+  try {
+    files = fs.readdirSync(AUTH_DIR).filter((f) => f.startsWith("app-state-sync-key-") && f.endsWith(".json"));
+  } catch {
+    return null;
+  }
+  for (const f of files) {
+    try {
+      const j = JSON.parse(fs.readFileSync(path.join(AUTH_DIR, f), "utf8")) as { timestamp?: number | string | { low: number; high: number } };
+      const t = j.timestamp;
+      const ts = typeof t === "object" && t ? t.high * 2 ** 32 + (t.low >>> 0) : Number(t ?? 0);
+      // file names encode ids filesystem-safely ("/" -> "__"); undo that
+      const id = f.slice("app-state-sync-key-".length, -".json".length).replace(/__/g, "/").replace(/-/g, ":");
+      if (!best || ts > best.ts) best = { id, ts };
+    } catch {
+      /* unreadable key file */
+    }
+  }
+  return best?.id ?? null;
+}
+
 /** Baileys' media download has no timeout; a stalled CDN connection would hold a queue slot forever. */
 function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
   return new Promise<T>((resolve, reject) => {
@@ -221,6 +245,21 @@ class WhatsAppManager {
     const alive = () => gen === this.generation;
 
     sock.ev.on("creds.update", saveCreds);
+    // Baileys encrypts app-state patches (delete-for-me, …) with the LAST key of whatever key share the
+    // phone sent. A share right after linking contains every key, oldest ones last, so it picked a retired
+    // key and the phone silently ignored every patch. Always use the newest key instead.
+    const useNewestAppStateKey = () => {
+      const newest = newestAppStateKeyId();
+      if (newest && state.creds.myAppStateKeyId !== newest) {
+        console.info("[appstate] using newest app-state key", { was: state.creds.myAppStateKeyId, now: newest });
+        state.creds.myAppStateKeyId = newest;
+        void saveCreds();
+      }
+    };
+    useNewestAppStateKey();
+    sock.ev.on("creds.update", (u) => {
+      if ("myAppStateKeyId" in u) useNewestAppStateKey();
+    });
 
     sock.ev.on("connection.update", async (u) => {
       if (!alive()) return;
