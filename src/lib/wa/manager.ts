@@ -117,16 +117,15 @@ interface DeleteForMeTarget {
   ts: number;
 }
 /**
- * Every delete-for-me is one app-state patch the phone has to replay. Flooding the collection (several
- * repeats per message plus bulk re-sends after restarts) made the phone stop applying them altogether,
- * so keep it to one patch per message, sent after the phone has had time to receive the message,
- * plus a single late repeat.
+ * Delete-for-me schedule: right away, then repeated after 5 s, 10 s, 1 min and 30 min. The phone ignores a
+ * delete for a message it hasn't received yet, and repeating the same action later is harmless, so the
+ * repeats cover a phone that is asleep or slow to get the message.
  */
-const DELETE_FIRST_DELAY_MS = 30_000;
+const DELETE_FIRST_DELAY_MS = 0;
 /** When to repeat a delete-for-me after the first one (see scheduleDeleteRetries). */
-const DELETE_RETRY_DELAYS_MS = [10 * 60_000];
+const DELETE_RETRY_DELAYS_MS = [5_000, 10_000, 60_000, 30 * 60_000];
 /** After a reconnect, deletes for messages removed within this window are sent again (timers were lost). */
-const DELETE_RESEND_WINDOW_S = 15 * 60;
+const DELETE_RESEND_WINDOW_S = 35 * 60;
 /** Cap on deletes re-sent after a reconnect. */
 const DELETE_RESEND_MAX = 20;
 
@@ -827,8 +826,7 @@ class WhatsAppManager {
       participant: group ? m.key.participant || "0" : "0",
       ts,
     };
-    // Give the phone time to receive the message first: it ignores a delete for a message it doesn't have yet.
-    await new Promise((r) => setTimeout(r, DELETE_FIRST_DELAY_MS));
+    if (DELETE_FIRST_DELAY_MS) await new Promise((r) => setTimeout(r, DELETE_FIRST_DELAY_MS));
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
         await this.sendDeleteForMe(target);
