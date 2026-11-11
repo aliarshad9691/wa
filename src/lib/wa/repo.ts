@@ -586,13 +586,13 @@ export function lidForPn(pn: string): string | null {
 }
 
 /** Messages already removed from the phone recently; their delete-for-me is re-sent after a reconnect. */
-export function recentlyRemovedFromPhone(sinceTs: number) {
+export function recentlyRemovedFromPhone(sinceTs: number, limit: number) {
   return db
     .prepare(
       `SELECT chat_id, id, from_me, sender_jid, ts FROM messages
-       WHERE removed_from_phone = 1 AND ts >= ? ORDER BY ts DESC LIMIT 100`,
+       WHERE removed_from_phone = 1 AND ts >= ? ORDER BY ts DESC LIMIT ?`,
     )
-    .all(sinceTs) as { chat_id: string; id: string; from_me: number; sender_jid: string | null; ts: number }[];
+    .all(sinceTs, limit) as { chat_id: string; id: string; from_me: number; sender_jid: string | null; ts: number }[];
 }
 
 export function markRemovedFromPhone(chatId: string, id: string) {
