@@ -48,6 +48,84 @@ export default function ChatPane({
   const stickBottom = useRef(true);
   const isGroup = chat?.isGroup ?? chatId.endsWith("@g.us");
 
+  // Phone: swipe the chat to the right to close it (like WhatsApp), revealing the chat list underneath.
+  const pane = useRef<HTMLDivElement>(null);
+  const onBackRef = useRef(onBack);
+  onBackRef.current = onBack;
+  useEffect(() => {
+    const el = pane.current;
+    if (!el) return;
+    const phone = window.matchMedia("(max-width: 767px)");
+    const standalone =
+      window.matchMedia("(display-mode: standalone)").matches || (navigator as Navigator & { standalone?: boolean }).standalone === true;
+    // samples: recent [x, time] points, for the release speed (a flick closes even when short)
+    let s: { x: number; y: number; dx: number; mode: "h" | "v" | null; samples: [number, number][] } | null = null;
+
+    const setX = (x: number, animate: boolean) => {
+      el.style.transition = animate ? "transform 200ms ease-out" : "none";
+      el.style.transform = x ? `translate3d(${x}px,0,0)` : "";
+      el.style.boxShadow = x ? "-8px 0 24px rgba(0,0,0,0.18)" : "";
+    };
+    const onStart = (e: TouchEvent) => {
+      s = null;
+      if (!phone.matches || e.touches.length !== 1) return;
+      const t = e.touches[0];
+      // Safari's own edge swipe already goes back (and closes the chat through history); don't fight it.
+      if (!standalone && t.clientX < 20) return;
+      if ((e.target as HTMLElement).closest("input, textarea, select, [data-no-swipe]")) return;
+      s = { x: t.clientX, y: t.clientY, dx: 0, mode: null, samples: [[t.clientX, performance.now()]] };
+    };
+    const onMove = (e: TouchEvent) => {
+      if (!s) return;
+      const t = e.touches[0];
+      const dx = t.clientX - s.x;
+      const dy = t.clientY - s.y;
+      if (!s.mode) {
+        if (Math.abs(dx) < 10 && Math.abs(dy) < 10) return;
+        s.mode = dx > 0 && Math.abs(dx) > Math.abs(dy) * 1.3 ? "h" : "v";
+        if (s.mode === "v") {
+          s = null; // normal scrolling
+          return;
+        }
+      }
+      e.preventDefault(); // horizontal drag: don't scroll the messages
+      s.dx = Math.max(0, dx);
+      const now = performance.now();
+      s.samples.push([t.clientX, now]);
+      while (s.samples.length > 2 && now - s.samples[0][1] > 100) s.samples.shift();
+      setX(s.dx, false);
+    };
+    const onEnd = () => {
+      if (!s || s.mode !== "h") {
+        s = null;
+        return;
+      }
+      const width = el.offsetWidth;
+      // speed over the last ~100 ms, in px per ms (positive = moving right)
+      const [x0, t0] = s.samples[0];
+      const [x1, t1] = s.samples[s.samples.length - 1];
+      const speed = (x1 - x0) / Math.max(1, t1 - t0);
+      const close = s.dx > width * 0.35 || (speed > 0.4 && s.dx > 40);
+      s = null;
+      if (close) {
+        setX(width, true);
+        setTimeout(() => onBackRef.current(), 180);
+      } else {
+        setX(0, true);
+      }
+    };
+    el.addEventListener("touchstart", onStart, { passive: true });
+    el.addEventListener("touchmove", onMove, { passive: false });
+    el.addEventListener("touchend", onEnd);
+    el.addEventListener("touchcancel", onEnd);
+    return () => {
+      el.removeEventListener("touchstart", onStart);
+      el.removeEventListener("touchmove", onMove);
+      el.removeEventListener("touchend", onEnd);
+      el.removeEventListener("touchcancel", onEnd);
+    };
+  }, []);
+
   const api = useCallback(
     (qs: string) =>
       fetch(`/api/chats/${encodeURIComponent(chatId)}/messages?${qs}${onlyDeleted ? "&deleted=1" : ""}`).then(
@@ -303,7 +381,7 @@ export default function ChatPane({
   const name = chat?.name || phoneOf(chatId);
 
   return (
-    <div className="relative flex h-full w-full flex-col">
+    <div ref={pane} className="relative flex h-full w-full flex-col bg-panel">
       {/* header */}
       <header className="z-10 flex h-[59px] shrink-0 items-center gap-2 border-l border-line bg-panel-header px-3 sm:gap-3 sm:px-4">
         <button onClick={onBack} className="-m-2 rounded-full p-2 text-muted md:hidden" title="Back" aria-label="Back">

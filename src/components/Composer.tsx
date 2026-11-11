@@ -176,7 +176,7 @@ export default function Composer({
     <>
       {/* attachment preview */}
       {pending && (
-        <div className="absolute inset-0 z-30 flex flex-col bg-panel-header">
+        <div data-no-swipe className="absolute inset-0 z-30 flex flex-col bg-panel-header">
           <div className="flex h-[59px] items-center gap-4 px-4">
             <button onClick={() => setPending(null)} className="text-muted" title="Cancel">
               <X size={24} />

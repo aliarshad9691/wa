@@ -13,6 +13,7 @@ export default function MediaViewer({ m, title, onClose }: { m: Message; title: 
 
   return (
     <div
+      data-no-swipe
       className="fixed inset-0 z-50 flex flex-col bg-panel/95 pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)] backdrop-blur-sm"
       onClick={onClose}
     >

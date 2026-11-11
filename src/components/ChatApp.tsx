@@ -124,10 +124,27 @@ export default function ChatApp({ user }: { user: SessionUser }) {
     setView("settings");
   }
 
+  const activeRef = useRef<string | null>(null);
+  activeRef.current = activeId;
+
   const openChat = useCallback((id: string, f?: FocusTarget) => {
+    // Opening a chat from the list adds a history entry, so the phone's back gesture / Back button
+    // (iPhone Safari edge swipe, Android back) closes the chat instead of leaving the app.
+    const h = "#" + encodeURIComponent(id);
+    if (!activeRef.current) history.pushState({ chat: id }, "", window.location.pathname + h);
+    else if (window.location.hash !== h) history.replaceState({ chat: id }, "", window.location.pathname + h);
     setActiveId(id);
     setFocus(f ?? null);
     setView("chats");
+  }, []);
+
+  const closeChat = useCallback(() => {
+    // Undo our own history entry if there is one, otherwise just clear the hash.
+    if ((history.state as { chat?: string } | null)?.chat) history.back();
+    else {
+      history.replaceState(null, "", window.location.pathname);
+      setActiveId(null);
+    }
   }, []);
 
   // Keep the URL hash in sync so reloads return to the same chat.
@@ -136,14 +153,16 @@ export default function ChatApp({ user }: { user: SessionUser }) {
     const t = fromHash ? setTimeout(() => setActiveId(fromHash), 0) : null;
     const onHash = () => setActiveId(decodeURIComponent(window.location.hash.slice(1)) || null);
     window.addEventListener("hashchange", onHash);
+    window.addEventListener("popstate", onHash);
     return () => {
       if (t) clearTimeout(t);
       window.removeEventListener("hashchange", onHash);
+      window.removeEventListener("popstate", onHash);
     };
   }, []);
   useEffect(() => {
     const h = activeId ? "#" + encodeURIComponent(activeId) : "";
-    if (window.location.hash !== h) history.replaceState(null, "", window.location.pathname + h);
+    if (window.location.hash !== h) history.replaceState(activeId ? { chat: activeId } : null, "", window.location.pathname + h);
   }, [activeId]);
 
   const activeChat = chats.find((c) => c.id === activeId) || null;
@@ -153,9 +172,7 @@ export default function ChatApp({ user }: { user: SessionUser }) {
       <div className="relative flex h-full w-full max-w-[1600px] overflow-hidden bg-panel shadow-[0_6px_18px_rgba(11,20,26,0.05)]">
         {/* Left column */}
         <aside
-          className={`flex h-full w-full flex-col border-r border-line bg-panel md:w-[40%] md:max-w-[460px] md:min-w-[320px] lg:w-[30%] ${
-            activeId && view === "chats" ? "hidden md:flex" : "flex"
-          }`}
+          className={`flex h-full w-full flex-col border-r border-line bg-panel md:w-[40%] md:max-w-[460px] md:min-w-[320px] lg:w-[30%]`}
         >
           {view === "settings" ? (
             <SettingsPanel user={user} wa={wa} onBack={() => setView("chats")} />
@@ -174,7 +191,13 @@ export default function ChatApp({ user }: { user: SessionUser }) {
         </aside>
 
         {/* Right column */}
-        <main className={`h-full min-w-0 flex-1 ${activeId && view === "chats" ? "flex" : "hidden md:flex"}`}>
+        <main
+          className={`min-w-0 flex-1 ${
+            activeId && view === "chats"
+              ? "absolute inset-0 z-20 flex md:static md:z-auto" // phone: chat covers the list
+              : "hidden h-full md:flex"
+          } md:h-full`}
+        >
           {activeId ? (
             <ChatPane
               key={activeId}
@@ -183,7 +206,7 @@ export default function ChatApp({ user }: { user: SessionUser }) {
               wa={wa}
               events={events}
               focus={focus?.chatId === activeId ? focus : null}
-              onBack={() => setActiveId(null)}
+              onBack={closeChat}
               onRead={scheduleChats}
             />
           ) : (
