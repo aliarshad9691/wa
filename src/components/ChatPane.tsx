@@ -48,6 +48,84 @@ export default function ChatPane({
   const stickBottom = useRef(true);
   const isGroup = chat?.isGroup ?? chatId.endsWith("@g.us");
 
+  // Phone: swipe the chat to the right to close it (like WhatsApp), revealing the chat list underneath.
+  const pane = useRef<HTMLDivElement>(null);
+  const onBackRef = useRef(onBack);
+  onBackRef.current = onBack;
+  useEffect(() => {
+    const el = pane.current;
+    if (!el) return;
+    const phone = window.matchMedia("(max-width: 767px)");
+    const standalone =
+      window.matchMedia("(display-mode: standalone)").matches || (navigator as Navigator & { standalone?: boolean }).standalone === true;
+    // samples: recent [x, time] points, for the release speed (a flick closes even when short)
+    let s: { x: number; y: number; dx: number; mode: "h" | "v" | null; samples: [number, number][] } | null = null;
+
+    const setX = (x: number, animate: boolean) => {
+      el.style.transition = animate ? "transform 200ms ease-out" : "none";
+      el.style.transform = x ? `translate3d(${x}px,0,0)` : "";
+      el.style.boxShadow = x ? "-8px 0 24px rgba(0,0,0,0.18)" : "";
+    };
+    const onStart = (e: TouchEvent) => {
+      s = null;
+      if (!phone.matches || e.touches.length !== 1) return;
+      const t = e.touches[0];
+      // Safari's own edge swipe already goes back (and closes the chat through history); don't fight it.
+      if (!standalone && t.clientX < 20) return;
+      if ((e.target as HTMLElement).closest("input, textarea, select, [data-no-swipe]")) return;
+      s = { x: t.clientX, y: t.clientY, dx: 0, mode: null, samples: [[t.clientX, performance.now()]] };
+    };
+    const onMove = (e: TouchEvent) => {
+      if (!s) return;
+      const t = e.touches[0];
+      const dx = t.clientX - s.x;
+      const dy = t.clientY - s.y;
+      if (!s.mode) {
+        if (Math.abs(dx) < 10 && Math.abs(dy) < 10) return;
+        s.mode = dx > 0 && Math.abs(dx) > Math.abs(dy) * 1.3 ? "h" : "v";
+        if (s.mode === "v") {
+          s = null; // normal scrolling
+          return;
+        }
+      }
+      e.preventDefault(); // horizontal drag: don't scroll the messages
+      s.dx = Math.max(0, dx);
+      const now = performance.now();
+      s.samples.push([t.clientX, now]);
+      while (s.samples.length > 2 && now - s.samples[0][1] > 100) s.samples.shift();
+      setX(s.dx, false);
+    };
+    const onEnd = () => {
+      if (!s || s.mode !== "h") {
+        s = null;
+        return;
+      }
+      const width = el.offsetWidth;
+      // speed over the last ~100 ms, in px per ms (positive = moving right)
+      const [x0, t0] = s.samples[0];
+      const [x1, t1] = s.samples[s.samples.length - 1];
+      const speed = (x1 - x0) / Math.max(1, t1 - t0);
+      const close = s.dx > width * 0.35 || (speed > 0.4 && s.dx > 40);
+      s = null;
+      if (close) {
+        setX(width, true);
+        setTimeout(() => onBackRef.current(), 180);
+      } else {
+        setX(0, true);
+      }
+    };
+    el.addEventListener("touchstart", onStart, { passive: true });
+    el.addEventListener("touchmove", onMove, { passive: false });
+    el.addEventListener("touchend", onEnd);
+    el.addEventListener("touchcancel", onEnd);
+    return () => {
+      el.removeEventListener("touchstart", onStart);
+      el.removeEventListener("touchmove", onMove);
+      el.removeEventListener("touchend", onEnd);
+      el.removeEventListener("touchcancel", onEnd);
+    };
+  }, []);
+
   const api = useCallback(
     (qs: string) =>
       fetch(`/api/chats/${encodeURIComponent(chatId)}/messages?${qs}${onlyDeleted ? "&deleted=1" : ""}`).then(
@@ -92,10 +170,27 @@ export default function ChatPane({
     };
   }, [api, focus, loadLatest]);
 
-  // per-chat read receipts switch: follow the chat list when it changes (other tab, other device)
+  // per-chat read receipts switch. Load it from the server for this chat: hidden (filtered) chats
+  // and chats opened from search are not in the chat list, so `chat` can be null.
   useEffect(() => {
+    let cancelled = false;
     setReceipts(chat?.readReceipts ?? false);
-  }, [chatId, chat?.readReceipts]);
+    void fetch(`/api/chats/${encodeURIComponent(chatId)}/receipts`)
+      .then((r) => (r.ok ? (r.json() as Promise<{ enabled: boolean }>) : null))
+      .then((d) => {
+        if (d && !cancelled) setReceipts(d.enabled);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- reload per chat; list changes handled below
+  }, [chatId]);
+
+  // follow the chat list when it changes (another tab or device flipped the switch)
+  useEffect(() => {
+    if (chat) setReceipts(chat.readReceipts);
+  }, [chat?.readReceipts]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const toggleReceipts = useCallback(async () => {
     const next = !receipts;
@@ -286,10 +381,10 @@ export default function ChatPane({
   const name = chat?.name || phoneOf(chatId);
 
   return (
-    <div className="relative flex h-full w-full flex-col">
+    <div ref={pane} className="relative flex h-full w-full flex-col bg-panel">
       {/* header */}
-      <header className="z-10 flex h-[59px] shrink-0 items-center gap-3 border-l border-line bg-panel-header px-4">
-        <button onClick={onBack} className="text-muted md:hidden" title="Back">
+      <header className="z-10 flex h-[59px] shrink-0 items-center gap-2 border-l border-line bg-panel-header px-3 sm:gap-3 sm:px-4">
+        <button onClick={onBack} className="-m-2 rounded-full p-2 text-muted md:hidden" title="Back" aria-label="Back">
           <ArrowLeft size={22} />
         </button>
         <Avatar id={chatId} isGroup={isGroup} size={40} />
@@ -321,17 +416,22 @@ export default function ChatPane({
         <button
           onClick={() => setOnlyDeleted((v) => !v)}
           title={onlyDeleted ? "Show all messages" : "Show only deleted messages"}
+          aria-label={onlyDeleted ? "Show all messages" : "Show only deleted messages"}
           className={`flex items-center gap-1.5 rounded-full px-3 py-1.5 text-[13px] ${
             onlyDeleted ? "bg-deleted text-deleted-fg ring-1 ring-deleted-border" : "text-muted hover:bg-black/5 dark:hover:bg-white/5"
           }`}
         >
-          {onlyDeleted ? <X size={15} /> : <Search size={15} />}
-          {onlyDeleted ? "Deleted only" : `Deleted${deletedCount ? ` (${deletedCount}+)` : ""}`}
+          {onlyDeleted ? <X size={15} /> : <Search size={17} />}
+          {onlyDeleted ? (
+            "Deleted only"
+          ) : (
+            <span className="hidden sm:inline">{`Deleted${deletedCount ? ` (${deletedCount}+)` : ""}`}</span>
+          )}
         </button>
       </header>
 
       {/* messages */}
-      <div ref={scroller} onScroll={onScroll} className="chat-wallpaper scroll-thin relative min-h-0 flex-1 overflow-y-auto pb-3">
+      <div ref={scroller} onScroll={onScroll} className="chat-wallpaper scroll-thin relative min-h-0 flex-1 overflow-x-hidden overflow-y-auto pb-3">
         {loading ? (
           <div className="flex h-full items-center justify-center text-muted">
             <LoaderCircle className="animate-spin" />

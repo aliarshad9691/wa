@@ -87,6 +87,36 @@
 html,
 body {
   height: 100%;
+  /* the app scrolls inside its panes only; the page itself never scrolls or rubber-bands */
+  overflow: hidden;
+  overscroll-behavior: none;
+}
+
+/*
+ * App frame pinned to the part of the screen the user can actually see. On iPhone Safari the
+ * toolbars and the keyboard change that area; ChatApp keeps --vvh / --vv-top in sync with
+ * window.visualViewport, so the composer sits right above the keyboard and nothing scrolls the page.
+ */
+.app-shell {
+  position: fixed;
+  left: 0;
+  right: 0;
+  top: var(--vv-top, 0px);
+  height: 100%;
+  height: var(--vvh, 100dvh);
+  padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+  background: var(--panel-header);
+}
+/* with the keyboard open the home indicator is hidden, so drop the bottom inset */
+.kb-open .app-shell {
+  padding-bottom: 0;
+}
+@media (min-width: 1280px) {
+  .app-shell {
+    background: var(--app-bg);
+    padding-top: calc(19px + env(safe-area-inset-top));
+    padding-bottom: calc(19px + env(safe-area-inset-bottom));
+  }
 }
 
 body {
@@ -108,6 +138,31 @@ body {
 .scroll-thin {
   scrollbar-width: thin;
   scrollbar-color: rgba(134, 150, 160, 0.4) transparent;
+  /* reaching the end of a list must not drag the whole page along */
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+}
+
+/* touch screens (phones, tablets) */
+@media (hover: none) and (pointer: coarse) {
+  /* iOS zooms into any field with text under 16px */
+  input:not([type="checkbox"]):not([type="radio"]):not([type="range"]),
+  textarea,
+  select {
+    font-size: 16px !important;
+  }
+  button,
+  a,
+  [role="button"] {
+    touch-action: manipulation; /* no double-tap-zoom delay */
+    -webkit-tap-highlight-color: transparent;
+  }
+  /* long-press on a bubble opens its menu, not the iOS text callout */
+  .bubble-touch {
+    -webkit-touch-callout: none;
+    -webkit-user-select: none;
+    user-select: none;
+  }
 }
 
 .bubble {
