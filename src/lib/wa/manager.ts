@@ -92,10 +92,19 @@ interface DeleteForMeTarget {
   participant: string;
   ts: number;
 }
+/**
+ * Every delete-for-me is one app-state patch the phone has to replay. Flooding the collection (several
+ * repeats per message plus bulk re-sends after restarts) made the phone stop applying them altogether,
+ * so keep it to one patch per message, sent after the phone has had time to receive the message,
+ * plus a single late repeat.
+ */
+const DELETE_FIRST_DELAY_MS = 30_000;
 /** When to repeat a delete-for-me after the first one (see scheduleDeleteRetries). */
-const DELETE_RETRY_DELAYS_MS = [60_000, 10 * 60_000, 60 * 60_000, 6 * 60 * 60_000];
-/** After a reconnect, deletes for messages newer than this are sent again. */
-const DELETE_RESEND_WINDOW_S = 6 * 3600;
+const DELETE_RETRY_DELAYS_MS = [10 * 60_000];
+/** After a reconnect, deletes for messages removed within this window are sent again (timers were lost). */
+const DELETE_RESEND_WINDOW_S = 15 * 60;
+/** Cap on deletes re-sent after a reconnect. */
+const DELETE_RESEND_MAX = 20;
 
 class WhatsAppManager {
   sock: WASocket | null = null;
@@ -779,6 +788,8 @@ class WhatsAppManager {
       participant: group ? m.key.participant || "0" : "0",
       ts,
     };
+    // Give the phone time to receive the message first: it ignores a delete for a message it doesn't have yet.
+    await new Promise((r) => setTimeout(r, DELETE_FIRST_DELAY_MS));
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
         await this.sendDeleteForMe(target);
@@ -845,7 +856,7 @@ class WhatsAppManager {
   /** After (re)connecting, re-send delete-for-me for recently removed messages: timers don't survive restarts. */
   private async resendRecentDeletes() {
     if (!this.filtered.size) return;
-    const rows = repo.recentlyRemovedFromPhone(Math.floor(Date.now() / 1000) - DELETE_RESEND_WINDOW_S);
+    const rows = repo.recentlyRemovedFromPhone(Math.floor(Date.now() / 1000) - DELETE_RESEND_WINDOW_S, DELETE_RESEND_MAX);
     for (const r of rows) {
       if (this.state.status !== "open") return;
       const group = isJidGroup(r.chat_id);
