@@ -1,7 +1,15 @@
 import { NextResponse } from "next/server";
 import { requireUser } from "@/lib/session";
 import { wa } from "@/lib/wa/manager";
+import { getChat } from "@/lib/wa/repo";
 import { decodeParam } from "@/lib/params";
+
+/** Current state of the switch. Read per chat: hidden chats are not in the chat list. */
+export async function GET(_req: Request, { params }: { params: Promise<{ id: string }> }) {
+  const { deny } = await requireUser();
+  if (deny) return deny;
+  return NextResponse.json({ enabled: Boolean(getChat(decodeParam((await params).id))?.read_receipts) });
+}
 
 /** Per-chat read receipts switch: { enabled: boolean }. */
 export async function POST(req: Request, { params }: { params: Promise<{ id: string }> }) {
