@@ -456,6 +456,11 @@ export function upsertMessage(
       extra.revokedStub ? p.ts : null,
       extra.raw || null,
     );
+    // Hidden chats: my own messages (sent from the app or the phone) count as seen when sent,
+    // so they stop being shown HIDDEN_VIEW_TTL_S after sending. Kept in the DB like the rest.
+    if (p.from_me && isHiddenChat(chatId)) {
+      db.prepare("UPDATE messages SET viewed_at = unixepoch() WHERE chat_id = ? AND id = ? AND viewed_at IS NULL").run(chatId, p.id);
+    }
     return { row: getMessage(chatId, p.id)!, isNew: true };
   }
 
