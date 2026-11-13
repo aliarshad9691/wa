@@ -3,6 +3,8 @@ import { requireChat } from "@/lib/session";
 import { wa } from "@/lib/wa/manager";
 import { decodeParam } from "@/lib/params";
 import { toVoiceNote } from "@/lib/audio";
+import { grantHistory, isSecret } from "@/lib/hidden";
+import { isHiddenChat } from "@/lib/wa/repo";
 
 const MAX_BYTES = 100 * 1024 * 1024;
 
@@ -14,7 +16,7 @@ const MAX_BYTES = 100 * 1024 * 1024;
  *   quotedId  – optional id of the message being replied to
  */
 export async function POST(req: Request, { params }: { params: Promise<{ id: string }> }) {
-  const { deny } = await requireChat(decodeParam((await params).id));
+  const { user, deny } = await requireChat(decodeParam((await params).id));
   if (deny) return deny;
   const chatId = decodeParam((await params).id);
   try {
@@ -23,6 +25,15 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     const mode = String(form.get("mode") || "media");
     const quotedId = String(form.get("quotedId") || "") || undefined;
     const file = form.get("file");
+
+    // The secret code is never sent to WhatsApp (not even as a caption). In a hidden chat it
+    // shows that chat's full history instead, including messages hidden after being viewed.
+    if (isSecret(text)) {
+      if (!isHiddenChat(chatId) || !user.email) return NextResponse.json({ secret: true });
+      const res = NextResponse.json({ secret: true, revealed: true });
+      grantHistory(res, user.email, chatId);
+      return res;
+    }
 
     if (file && typeof file !== "string") {
       if (file.size > MAX_BYTES) return NextResponse.json({ error: "File too large (max 100 MB)" }, { status: 413 });

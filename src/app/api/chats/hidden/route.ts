@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { requireUser } from "@/lib/session";
-import { grantUnlock, revokeUnlock } from "@/lib/hidden";
+import { grantUnlock, revokeHistory, revokeUnlock } from "@/lib/hidden";
 import { listChats } from "@/lib/wa/repo";
 
 /**
@@ -19,11 +19,15 @@ export async function GET(req: Request) {
   return res;
 }
 
-/** Lock the hidden chats again (page load, search cleared, hidden chat closed). */
-export async function DELETE() {
+/**
+ * Lock the hidden chats again (page load, search cleared, hidden chat closed).
+ * ?scope=history only ends the full-history view of a chat (closed after typing the secret in it).
+ */
+export async function DELETE(req: Request) {
   const { deny } = await requireUser();
   if (deny) return deny;
   const res = NextResponse.json({ ok: true });
-  revokeUnlock(res);
+  if (new URL(req.url).searchParams.get("scope") === "history") revokeHistory(res);
+  else revokeUnlock(res);
   return res;
 }

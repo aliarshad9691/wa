@@ -23,7 +23,8 @@ export default function Composer({
   disabled: boolean;
   replyTo: Message | null;
   onCancelReply: () => void;
-  onSent: () => void;
+  /** secret: the text was the secret code and was not sent; revealed: full history unlocked. */
+  onSent: (r: { secret?: boolean; revealed?: boolean }) => void;
   onError: (msg: string) => void;
 }) {
   const [text, setText] = useState(() => {
@@ -81,7 +82,7 @@ export default function Composer({
     try {
       const r = await fetch(`/api/chats/${encodeURIComponent(chatId)}/send`, { method: "POST", body: form });
       if (!r.ok) throw new Error(((await r.json().catch(() => ({}))) as { error?: string }).error || "Send failed");
-      onSent();
+      onSent((await r.json().catch(() => ({}))) as { secret?: boolean; revealed?: boolean });
       return true;
     } catch (e) {
       onError((e as Error).message);
