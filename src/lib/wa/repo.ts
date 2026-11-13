@@ -25,6 +25,15 @@ export function learnLid(lid: string | null | undefined, pn: string | null | und
   if (!isLidUser(l) || !isPnUser(p)) return;
   const existing = getLid.get(l);
   if (existing?.pn === p) return;
+  try {
+    mergeLid(l, p);
+  } catch (e) {
+    // Never let the merge stop a message from being stored (it is kept under the LID instead).
+    console.error("[lid] merge failed", { lid: l, error: (e as Error).message });
+  }
+}
+
+function mergeLid(l: string, p: string) {
   db.transaction(() => {
     db.prepare("INSERT INTO lid_map(lid, pn) VALUES(?, ?) ON CONFLICT(lid) DO UPDATE SET pn = excluded.pn").run(l, p);
     const lidChat = db.prepare("SELECT * FROM chats WHERE id = ?").get(l) as ChatRow | undefined;
@@ -52,7 +61,8 @@ export function learnLid(lid: string | null | undefined, pn: string | null | und
 /* ---------------------------------------------------------------- chats */
 
 export function ensureChat(id: string, opts: { isGroup?: boolean } = {}) {
-  db.prepare("INSERT OR IGNORE INTO chats(id, is_group) VALUES(?, ?)").run(id, opts.isGroup ?? (isJidGroup(id) ? 1 : 0));
+  // SQLite can't bind booleans: always pass 0/1.
+  db.prepare("INSERT OR IGNORE INTO chats(id, is_group) VALUES(?, ?)").run(id, (opts.isGroup ?? isJidGroup(id)) ? 1 : 0);
 }
 
 export function upsertChatMeta(
