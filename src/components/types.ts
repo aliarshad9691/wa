@@ -20,6 +20,7 @@ export interface ChatItem {
   pinned: boolean;
   muted: boolean;
   readReceipts: boolean;
+  lastHidden?: boolean; // hidden chat: every message is hidden (seen over 5 minutes ago)
   last: {
     id: string;
     fromMe: boolean;

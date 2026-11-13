@@ -560,7 +560,11 @@ export default function ChatPane({
                     ? deletedCount
                       ? "Showing only messages that were deleted on WhatsApp."
                       : "No deleted messages in this chat."
-                    : "Messages are archived on your server. Deleted messages stay visible and are highlighted."}
+                    : viewTtl != null
+                      ? shown.length
+                        ? `Messages are hidden ${ttlLabel(viewTtl)} after you've seen them. They stay saved on your server.`
+                        : `No new messages. Messages are hidden ${ttlLabel(viewTtl)} after you've seen them and stay saved on your server.`
+                      : "Messages are archived on your server. Deleted messages stay visible and are highlighted."}
                 </span>
               </div>
             )}
@@ -634,4 +638,9 @@ export default function ChatPane({
       {viewer && <MediaViewer m={viewer} title={viewer.fromMe ? "You" : viewer.senderName || name} onClose={() => setViewer(null)} />}
     </div>
   );
+}
+
+function ttlLabel(s: number) {
+  const m = Math.round(s / 60);
+  return s < 60 ? `${s} seconds` : m === 1 ? "1 minute" : `${m} minutes`;
 }

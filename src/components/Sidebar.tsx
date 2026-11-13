@@ -280,6 +280,8 @@ function ChatRow({ chat, active, onClick }: { chat: ChatItem; active: boolean; o
                   {l.isDeleted ? <span className="text-deleted-fg">Deleted{l.text || l.type !== "text" ? " · " : ""}</span> : null}
                   {l.isDeleted && !l.text && l.type === "text" ? <i>content not captured</i> : previewText(l.type, l.text)}
                 </>
+              ) : chat.lastHidden ? (
+                <i>No new messages</i>
               ) : null}
             </span>
           </span>

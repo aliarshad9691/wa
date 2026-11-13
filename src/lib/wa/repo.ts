@@ -132,6 +132,8 @@ export interface ChatListItem {
   pinned: boolean;
   muted: boolean;
   readReceipts: boolean;
+  /** Hidden chats: has messages, but every one of them is hidden (seen over 5 minutes ago). */
+  lastHidden: boolean;
   last: {
     id: string;
     fromMe: boolean;
@@ -185,7 +187,7 @@ export function isHiddenChat(chatId: string): boolean {
 export function listChats(opts: { hidden?: boolean } = {}): ChatListItem[] {
   const rows = db
     .prepare(
-      `SELECT c.*, m.id AS m_id, m.from_me AS m_from_me, m.type AS m_type, m.text AS m_text, m.status AS m_status,
+      `SELECT c.*, ${opts.hidden ? "EXISTS(SELECT 1 FROM messages x WHERE x.chat_id = c.id AND x.type != 'system')" : "0"} AS has_any, m.id AS m_id, m.from_me AS m_from_me, m.type AS m_type, m.text AS m_text, m.status AS m_status,
               m.is_deleted AS m_deleted, m.sender_jid AS m_sender, m.sender_name AS m_sender_name, m.file_name AS m_file
        FROM chats c
        LEFT JOIN messages m ON m.rowid = (
@@ -205,10 +207,12 @@ export function listChats(opts: { hidden?: boolean } = {}): ChatListItem[] {
     m_sender: string | null;
     m_sender_name: string | null;
     m_file: string | null;
+    has_any: number;
   })[];
   const now = Math.floor(Date.now() / 1000);
   return rows
-    .filter((r) => r.m_id || r.name)
+    // A hidden chat whose messages are all hidden still shows, so it's clear nothing is missing.
+    .filter((r) => r.m_id || r.name || r.has_any)
     .map((r) => ({
       id: r.id,
       name: r.is_group ? r.name || "Group" : displayName(r.id, r.name),
@@ -219,6 +223,7 @@ export function listChats(opts: { hidden?: boolean } = {}): ChatListItem[] {
       pinned: !!r.pinned,
       muted: r.muted_until === -1 || r.muted_until > now,
       readReceipts: !!r.read_receipts,
+      lastHidden: !r.m_id && !!r.has_any,
       last: r.m_id
         ? {
             id: r.m_id,
