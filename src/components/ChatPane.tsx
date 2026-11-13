@@ -31,6 +31,8 @@ export default function ChatPane({
   const [messages, setMessages] = useState<Message[]>([]);
   // Hidden chats only: seconds after first view when a message stops being shown (null = never).
   const [viewTtl, setViewTtl] = useState<number | null>(null);
+  // Hidden chats: the secret was typed into this chat's message box, so show its full history.
+  const [revealAll, setRevealAll] = useState(false);
   const [nowS, setNowS] = useState(() => Date.now() / 1000);
   const [loading, setLoading] = useState(true);
   const [hasMore, setHasMore] = useState(true);
@@ -141,8 +143,9 @@ export default function ChatPane({
         }
         return { messages: [], hasMore: false };
       }
-      const d = (await r.json()) as { messages: Message[]; hasMore: boolean; disappearAfterViewS?: number | null };
+      const d = (await r.json()) as { messages: Message[]; hasMore: boolean; disappearAfterViewS?: number | null; revealAll?: boolean };
       setViewTtl(d.disappearAfterViewS ?? null);
+      setRevealAll(Boolean(d.revealAll));
       return d;
     },
     [chatId, onlyDeleted],
@@ -412,16 +415,20 @@ export default function ChatPane({
 
   // Hidden chats: messages disappear (from view only) viewTtl seconds after they were first seen.
   const shown = useMemo(
-    () => (viewTtl == null ? messages : messages.filter((m) => m.viewedAt == null || m.viewedAt + viewTtl > nowS)),
-    [messages, viewTtl, nowS],
+    () => (viewTtl == null || revealAll ? messages : messages.filter((m) => m.viewedAt == null || m.viewedAt + viewTtl > nowS)),
+    [messages, viewTtl, nowS, revealAll],
   );
+  // The full history is shown only until this chat is closed.
+  const revealRef = useRef(false);
+  revealRef.current = revealAll;
+  useEffect(() => () => void (revealRef.current && fetch("/api/chats/hidden?scope=history", { method: "DELETE" }).catch(() => {})), []);
   useEffect(() => {
-    if (viewTtl == null) return;
+    if (viewTtl == null || revealAll) return;
     const next = Math.min(...messages.filter((m) => m.viewedAt != null).map((m) => m.viewedAt! + viewTtl).filter((t) => t > nowS));
     if (!Number.isFinite(next)) return;
     const t = setTimeout(() => setNowS(Date.now() / 1000), Math.max(250, (next - Date.now() / 1000) * 1000 + 50));
     return () => clearTimeout(t);
-  }, [messages, viewTtl, nowS]);
+  }, [messages, viewTtl, nowS, revealAll]);
 
   // ...and "seen" means on screen (in the middle part of the list) while the page is visible.
   useEffect(() => {
@@ -560,7 +567,9 @@ export default function ChatPane({
                     ? deletedCount
                       ? "Showing only messages that were deleted on WhatsApp."
                       : "No deleted messages in this chat."
-                    : viewTtl != null
+                    : viewTtl != null && revealAll
+                      ? "Showing the full history, including hidden messages. They are hidden again when you close this chat."
+                      : viewTtl != null
                       ? shown.length
                         ? `Messages are hidden ${ttlLabel(viewTtl)} after you've seen them. They stay saved on your server.`
                         : `No new messages. Messages are hidden ${ttlLabel(viewTtl)} after you've seen them and stay saved on your server.`
@@ -621,7 +630,18 @@ export default function ChatPane({
         disabled={wa.status !== "open"}
         replyTo={replyTo}
         onCancelReply={() => setReplyTo(null)}
-        onSent={() => {
+        onSent={(r) => {
+          if (r.secret) {
+            // Never sent. In a hidden chat it shows the full history.
+            setReplyTo(null);
+            setToast(r.revealed ? "Showing the full chat history" : "Not sent");
+            setTimeout(() => setToast(null), 3000);
+            if (r.revealed) {
+              setOnlyDeleted(false);
+              void loadLatest();
+            }
+            return;
+          }
           setReplyTo(null);
           stickBottom.current = true;
           if (!atLatest || onlyDeleted) {
