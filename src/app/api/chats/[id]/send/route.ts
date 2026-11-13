@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { requireUser } from "@/lib/session";
+import { requireChat } from "@/lib/session";
 import { wa } from "@/lib/wa/manager";
 import { decodeParam } from "@/lib/params";
 import { toVoiceNote } from "@/lib/audio";
@@ -14,7 +14,7 @@ const MAX_BYTES = 100 * 1024 * 1024;
  *   quotedId  – optional id of the message being replied to
  */
 export async function POST(req: Request, { params }: { params: Promise<{ id: string }> }) {
-  const { deny } = await requireUser();
+  const { deny } = await requireChat(decodeParam((await params).id));
   if (deny) return deny;
   const chatId = decodeParam((await params).id);
   try {

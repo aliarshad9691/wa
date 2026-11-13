@@ -99,6 +99,10 @@ export default function ChatApp({ user }: { user: SessionUser }) {
       es.addEventListener("history", (e) => {
         events.dispatchEvent(new CustomEvent("history", { detail: JSON.parse((e as MessageEvent).data) }));
       });
+      es.addEventListener("chat-changed", (e) => {
+        events.dispatchEvent(new CustomEvent("chat-changed", { detail: JSON.parse((e as MessageEvent).data) }));
+        scheduleChats(); // also makes the sidebar re-read the revealed hidden chats
+      });
       es.addEventListener("message", (e) => {
         const data = JSON.parse((e as MessageEvent).data) as { isNew: boolean; message: Message };
         events.dispatchEvent(new CustomEvent("message", { detail: data }));
@@ -149,13 +153,21 @@ export default function ChatApp({ user }: { user: SessionUser }) {
 
   // Keep the URL hash in sync so reloads return to the same chat.
   useEffect(() => {
+    // A fresh page starts with hidden chats locked, so a link or reload can't open one; only
+    // typing the secret into search unlocks them again. Open the linked chat after the lock lands.
     const fromHash = decodeURIComponent(window.location.hash.slice(1));
-    const t = fromHash ? setTimeout(() => setActiveId(fromHash), 0) : null;
+    let cancelled = false;
+    const t = setTimeout(() => {
+      void fetch("/api/chats/hidden", { method: "DELETE" })
+        .catch(() => {})
+        .then(() => !cancelled && fromHash && setActiveId(fromHash));
+    }, 0);
     const onHash = () => setActiveId(decodeURIComponent(window.location.hash.slice(1)) || null);
     window.addEventListener("hashchange", onHash);
     window.addEventListener("popstate", onHash);
     return () => {
-      if (t) clearTimeout(t);
+      cancelled = true;
+      clearTimeout(t);
       window.removeEventListener("hashchange", onHash);
       window.removeEventListener("popstate", onHash);
     };
@@ -165,7 +177,22 @@ export default function ChatApp({ user }: { user: SessionUser }) {
     if (window.location.hash !== h) history.replaceState(activeId ? { chat: activeId } : null, "", window.location.pathname + h);
   }, [activeId]);
 
-  const activeChat = chats.find((c) => c.id === activeId) || null;
+  // Hidden chats the secret revealed on this page. Keep them unlocked only while they are shown
+  // (search still holds the code, or one of them is open); lock again as soon as neither is true.
+  const [revealed, setRevealed] = useState<ChatItem[] | null>(null);
+  const [hiddenSeen, setHiddenSeen] = useState<Map<string, ChatItem>>(() => new Map());
+  const onReveal = useCallback((list: ChatItem[] | null) => {
+    setRevealed(list);
+    if (list?.length) setHiddenSeen((prev) => new Map([...prev, ...list.map((c) => [c.id, c] as const)]));
+  }, []);
+  const needUnlock = Boolean(revealed) || (activeId !== null && hiddenSeen.has(activeId));
+  const hadUnlock = useRef(false);
+  useEffect(() => {
+    if (hadUnlock.current && !needUnlock) void fetch("/api/chats/hidden", { method: "DELETE" }).catch(() => {});
+    hadUnlock.current = needUnlock;
+  }, [needUnlock]);
+
+  const activeChat = chats.find((c) => c.id === activeId) || (activeId ? hiddenSeen.get(activeId) : undefined) || null;
 
   return (
     <div className="app-shell flex w-full justify-center">
@@ -185,6 +212,7 @@ export default function ChatApp({ user }: { user: SessionUser }) {
               online={online}
               user={user}
               onOpen={openChat}
+              onReveal={onReveal}
               onSettings={() => setView("settings")}
             />
           )}

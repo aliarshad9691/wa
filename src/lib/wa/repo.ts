@@ -146,6 +146,11 @@ export interface ChatListItem {
 /** Chat ids of filtered numbers (phone JIDs and any LIDs mapped to them). These chats are hidden. */
 const HIDDEN_SQL = `SELECT pn FROM filtered_numbers UNION SELECT l.lid FROM lid_map l JOIN filtered_numbers f ON f.pn = l.pn`;
 
+/** True for a filtered number's chat (hidden unless the secret code is typed). */
+export function isHiddenChat(chatId: string): boolean {
+  return Boolean(db.prepare(`SELECT 1 FROM (${HIDDEN_SQL}) WHERE pn = ? LIMIT 1`).get(chatId));
+}
+
 /**
  * Chats for the sidebar. Filtered numbers' chats are left out, unless `hidden` is true, which
  * returns only those (shown when the secret search code is typed).

@@ -1,11 +1,11 @@
 import { NextResponse } from "next/server";
-import { requireUser } from "@/lib/session";
+import { requireChat } from "@/lib/session";
 import { listMessages } from "@/lib/wa/repo";
 import { wa } from "@/lib/wa/manager";
 import { decodeParam } from "@/lib/params";
 
 export async function GET(req: Request, { params }: { params: Promise<{ id: string }> }) {
-  const { deny } = await requireUser();
+  const { deny } = await requireChat(decodeParam((await params).id));
   if (deny) return deny;
   const id = decodeParam((await params).id);
   const url = new URL(req.url);

@@ -1,16 +1,16 @@
 import fs from "node:fs";
 import { Readable } from "node:stream";
 import { NextResponse } from "next/server";
-import { requireUser } from "@/lib/session";
+import { requireChat } from "@/lib/session";
 import { getMessage } from "@/lib/wa/repo";
 import { decodeParam } from "@/lib/params";
 import { localMediaPath, signedMediaUrl, usingS3 } from "@/lib/storage";
 
 /** Serves stored media: redirects to a short-lived S3 URL, or streams from local disk in dev. */
 export async function GET(req: Request, { params }: { params: Promise<{ chatId: string; msgId: string }> }) {
-  const { deny } = await requireUser();
-  if (deny) return deny;
   const p = await params;
+  const { deny } = await requireChat(decodeParam(p.chatId));
+  if (deny) return deny;
   const row = getMessage(decodeParam(p.chatId), decodeParam(p.msgId));
   if (!row?.media_key || row.media_status !== "ready") {
     return NextResponse.json({ error: "media not available", status: row?.media_status }, { status: 404 });
