@@ -1,5 +1,5 @@
 "use client";
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { ArrowLeft, CheckCheck, ChevronDown, LoaderCircle, Search, X } from "lucide-react";
 import Avatar from "./Avatar";
 import MessageBubble from "./MessageBubble";
@@ -29,6 +29,9 @@ export default function ChatPane({
   onRead: () => void;
 }) {
   const [messages, setMessages] = useState<Message[]>([]);
+  // Hidden chats only: seconds after first view when a message stops being shown (null = never).
+  const [viewTtl, setViewTtl] = useState<number | null>(null);
+  const [nowS, setNowS] = useState(() => Date.now() / 1000);
   const [loading, setLoading] = useState(true);
   const [hasMore, setHasMore] = useState(true);
   const [atLatest, setAtLatest] = useState(true);
@@ -138,7 +141,9 @@ export default function ChatPane({
         }
         return { messages: [], hasMore: false };
       }
-      return r.json();
+      const d = (await r.json()) as { messages: Message[]; hasMore: boolean; disappearAfterViewS?: number | null };
+      setViewTtl(d.disappearAfterViewS ?? null);
+      return d;
     },
     [chatId, onlyDeleted],
   );
@@ -405,6 +410,74 @@ export default function ChatPane({
     [chatId],
   );
 
+  // Hidden chats: messages disappear (from view only) viewTtl seconds after they were first seen.
+  const shown = useMemo(
+    () => (viewTtl == null ? messages : messages.filter((m) => m.viewedAt == null || m.viewedAt + viewTtl > nowS)),
+    [messages, viewTtl, nowS],
+  );
+  useEffect(() => {
+    if (viewTtl == null) return;
+    const next = Math.min(...messages.filter((m) => m.viewedAt != null).map((m) => m.viewedAt! + viewTtl).filter((t) => t > nowS));
+    if (!Number.isFinite(next)) return;
+    const t = setTimeout(() => setNowS(Date.now() / 1000), Math.max(250, (next - Date.now() / 1000) * 1000 + 50));
+    return () => clearTimeout(t);
+  }, [messages, viewTtl, nowS]);
+
+  // ...and "seen" means on screen (in the middle part of the list) while the page is visible.
+  useEffect(() => {
+    const root = scroller.current;
+    if (viewTtl == null || !root) return;
+    const unseen = new Set(shown.filter((m) => m.viewedAt == null && m.type !== "system").map((m) => m.id));
+    if (!unseen.size) return;
+    const onScreen = new Set<string>();
+    const queue = new Set<string>();
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const flush = async () => {
+      timer = null;
+      const ids = [...queue];
+      queue.clear();
+      if (!ids.length) return;
+      const r = await fetch(`/api/chats/${encodeURIComponent(chatId)}/viewed`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ids }),
+      }).catch(() => null);
+      if (!r?.ok) return ids.forEach((id) => unseen.add(id)); // try again on the next sighting
+      const { viewed } = (await r.json()) as { viewed: Record<string, number> };
+      setMessages((prev) => prev.map((m) => (viewed[m.id] != null && m.viewedAt == null ? { ...m, viewedAt: viewed[m.id] } : m)));
+    };
+    const enqueue = (id: string) => {
+      if (!unseen.delete(id)) return;
+      queue.add(id);
+      timer ??= setTimeout(flush, 800);
+    };
+    const io = new IntersectionObserver(
+      (entries) => {
+        for (const e of entries) {
+          const id = (e.target as HTMLElement).id.slice(4);
+          if (e.isIntersecting) onScreen.add(id);
+          else onScreen.delete(id);
+        }
+        if (document.visibilityState === "visible") onScreen.forEach(enqueue);
+      },
+      { root, rootMargin: "-15% 0px -15% 0px" },
+    );
+    for (const id of unseen) {
+      const el = document.getElementById(`msg-${id}`);
+      if (el) io.observe(el);
+    }
+    const onVisible = () => document.visibilityState === "visible" && onScreen.forEach(enqueue);
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      io.disconnect();
+      document.removeEventListener("visibilitychange", onVisible);
+      if (timer) {
+        clearTimeout(timer);
+        void flush();
+      }
+    };
+  }, [shown, viewTtl, chatId]);
+
   const deletedCount = messages.filter((m) => m.isDeleted).length;
   const name = chat?.name || phoneOf(chatId);
 
@@ -472,7 +545,7 @@ export default function ChatPane({
               </div>
             ) : (
               <div className="flex flex-col items-center gap-2 px-6 pt-4">
-                {!onlyDeleted && wa.status === "open" && messages.length > 0 && (
+                {!onlyDeleted && wa.status === "open" && shown.length > 0 && (
                   <button
                     onClick={askPhoneForOlder}
                     disabled={askingPhone}
@@ -491,8 +564,8 @@ export default function ChatPane({
                 </span>
               </div>
             )}
-            {messages.map((m, i) => {
-              const prev = messages[i - 1];
+            {shown.map((m, i) => {
+              const prev = shown[i - 1];
               const newDay = !prev || startOfDay(new Date(prev.ts * 1000)) !== startOfDay(new Date(m.ts * 1000));
               const first = newDay || !prev || prev.fromMe !== m.fromMe || prev.senderJid !== m.senderJid || prev.type === "system";
               return (

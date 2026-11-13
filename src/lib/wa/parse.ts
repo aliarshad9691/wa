@@ -4,7 +4,7 @@ import type { MessageRow, MessageType } from "../db";
 
 export type ParsedMessage = Omit<
   MessageRow,
-  "chat_id" | "media_key" | "media_status" | "is_deleted" | "deleted_at" | "is_edited" | "edit_history" | "reactions" | "created_at" | "raw" | "sender_name" | "removed_from_phone"
+  "chat_id" | "media_key" | "media_status" | "is_deleted" | "deleted_at" | "is_edited" | "edit_history" | "reactions" | "created_at" | "raw" | "sender_name" | "removed_from_phone" | "viewed_at"
 > & {
   hasMedia: boolean;
   /** protocol / control messages that should not be shown as bubbles */
