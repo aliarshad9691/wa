@@ -1,6 +1,6 @@
 import { requireUser } from "@/lib/session";
 import { wa, type WAEvent } from "@/lib/wa/manager";
-import { getMessage, toDTO } from "@/lib/wa/repo";
+import { getMessage, isHiddenChat, toDTO } from "@/lib/wa/repo";
 
 export const dynamic = "force-dynamic";
 
@@ -25,6 +25,9 @@ export async function GET(req: Request) {
         else if (e.type === "chats") send("chats", {});
         else if (e.type === "history") send("history", { chatIds: e.chatIds });
         else if (e.type === "message") {
+          // Hidden chats: no content on the stream (it was opened without the unlock). The open
+          // chat re-reads its messages through the guarded messages API instead.
+          if (isHiddenChat(e.chatId)) return send("chat-changed", { chatId: e.chatId });
           const row = getMessage(e.chatId, e.messageId);
           if (row) send("message", { isNew: e.isNew, message: toDTO(row) });
         }

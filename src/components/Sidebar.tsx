@@ -16,6 +16,7 @@ export default function Sidebar({
   online,
   user,
   onOpen,
+  onReveal,
   onSettings,
 }: {
   chats: ChatItem[];
@@ -25,6 +26,7 @@ export default function Sidebar({
   online: boolean;
   user: SessionUser;
   onOpen: (id: string, focus?: FocusTarget) => void;
+  onReveal: (chats: ChatItem[] | null) => void;
   onSettings: () => void;
 }) {
   const [query, setQuery] = useState("");
@@ -35,6 +37,10 @@ export default function Sidebar({
   // Chats of filtered numbers, returned by the server only when the query is the secret code.
   const [hidden, setHidden] = useState<{ q: string; chats: ChatItem[] } | null>(null);
   const revealed = hidden && hidden.q === query.trim() && hidden.chats.length ? hidden.chats : null;
+
+  // Tell the app which hidden chats are on screen, so it can lock them again once they aren't.
+  useEffect(() => onReveal(revealed), [revealed, onReveal]);
+  useEffect(() => () => onReveal(null), [onReveal]);
 
   const results = query.trim().length >= 2 && !revealed ? found : [];
   const chatName = useMemo(() => new Map([...chats, ...(revealed || [])].map((c) => [c.id, c.name])), [chats, revealed]);

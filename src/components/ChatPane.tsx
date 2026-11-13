@@ -52,6 +52,7 @@ export default function ChatPane({
   const pane = useRef<HTMLDivElement>(null);
   const onBackRef = useRef(onBack);
   onBackRef.current = onBack;
+  const gone = useRef(false);
   useEffect(() => {
     const el = pane.current;
     if (!el) return;
@@ -127,10 +128,18 @@ export default function ChatPane({
   }, []);
 
   const api = useCallback(
-    (qs: string) =>
-      fetch(`/api/chats/${encodeURIComponent(chatId)}/messages?${qs}${onlyDeleted ? "&deleted=1" : ""}`).then(
-        (r) => r.json() as Promise<{ messages: Message[]; hasMore: boolean }>,
-      ),
+    async (qs: string): Promise<{ messages: Message[]; hasMore: boolean }> => {
+      const r = await fetch(`/api/chats/${encodeURIComponent(chatId)}/messages?${qs}${onlyDeleted ? "&deleted=1" : ""}`);
+      if (r.status === 404) {
+        // A hidden chat opened from a link without typing the secret: just go back to the list.
+        if (!gone.current) {
+          gone.current = true;
+          onBackRef.current();
+        }
+        return { messages: [], hasMore: false };
+      }
+      return r.json();
+    },
     [chatId, onlyDeleted],
   );
 
@@ -248,6 +257,25 @@ export default function ChatPane({
     events.addEventListener("message", onMsg);
     return () => events.removeEventListener("message", onMsg);
   }, [events, chatId, atLatest, onlyDeleted]);
+
+  // Hidden chats get no message content over the live stream, only a nudge: re-read the latest page.
+  useEffect(() => {
+    if (!atLatest) return;
+    const onChanged = async (e: Event) => {
+      if ((e as CustomEvent<{ chatId: string }>).detail.chatId !== chatId) return;
+      const d = await api(`limit=${PAGE}`);
+      const el = scroller.current;
+      stickBottom.current = el ? el.scrollHeight - el.scrollTop - el.clientHeight < 150 : true;
+      setMessages((prev) => {
+        const byId = new Map(prev.map((m) => [m.id, m]));
+        for (const m of d.messages) byId.set(m.id, m);
+        return [...byId.values()].sort((a, b) => a.ts - b.ts);
+      });
+      if (document.visibilityState === "visible") void fetch(`/api/chats/${encodeURIComponent(chatId)}/read`, { method: "POST" });
+    };
+    events.addEventListener("chat-changed", onChanged);
+    return () => events.removeEventListener("chat-changed", onChanged);
+  }, [events, chatId, atLatest, api]);
 
   // scroll management
   useLayoutEffect(() => {
