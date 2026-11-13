@@ -56,6 +56,7 @@ export interface Message {
   deletedAt: number | null;
   isEdited: boolean;
   removedFromPhone: boolean;
+  viewedAt: number | null; // unix s, first time on screen (hidden chats)
   editHistory: { text: string | null; ts: number }[];
   reactions: { emoji: string; count: number; mine: boolean }[];
 }

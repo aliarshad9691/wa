@@ -2,7 +2,7 @@ import fs from "node:fs";
 import { Readable } from "node:stream";
 import { NextResponse } from "next/server";
 import { requireChat } from "@/lib/session";
-import { getMessage } from "@/lib/wa/repo";
+import { getMessage, isHiddenChat, viewExpired } from "@/lib/wa/repo";
 import { decodeParam } from "@/lib/params";
 import { localMediaPath, signedMediaUrl, usingS3 } from "@/lib/storage";
 
@@ -12,6 +12,7 @@ export async function GET(req: Request, { params }: { params: Promise<{ chatId: 
   const { deny } = await requireChat(decodeParam(p.chatId));
   if (deny) return deny;
   const row = getMessage(decodeParam(p.chatId), decodeParam(p.msgId));
+  if (row && viewExpired(row) && isHiddenChat(row.chat_id)) return NextResponse.json({ error: "not found" }, { status: 404 });
   if (!row?.media_key || row.media_status !== "ready") {
     return NextResponse.json({ error: "media not available", status: row?.media_status }, { status: 404 });
   }

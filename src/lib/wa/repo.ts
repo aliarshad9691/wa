@@ -146,6 +146,33 @@ export interface ChatListItem {
 /** Chat ids of filtered numbers (phone JIDs and any LIDs mapped to them). These chats are hidden. */
 const HIDDEN_SQL = `SELECT pn FROM filtered_numbers UNION SELECT l.lid FROM lid_map l JOIN filtered_numbers f ON f.pn = l.pn`;
 
+/**
+ * Hidden chats: a message stops being shown this long after it was first on screen in the app.
+ * It is only hidden from view; the row and its media stay in the database and storage.
+ */
+export const HIDDEN_VIEW_TTL_S = Math.max(10, Number(process.env.HIDDEN_VIEW_TTL_S) || 5 * 60); // env override for tests
+/** SQL condition: message is still shown (never viewed, or viewed less than the TTL ago). */
+const STILL_SHOWN = `(viewed_at IS NULL OR viewed_at > unixepoch() - ${HIDDEN_VIEW_TTL_S})`;
+
+export function viewExpired(r: Pick<MessageRow, "viewed_at">) {
+  return r.viewed_at != null && r.viewed_at <= Date.now() / 1000 - HIDDEN_VIEW_TTL_S;
+}
+
+/** Record the first time these messages were on screen. Returns id -> viewed_at for all of them. */
+export function markViewed(chatId: string, ids: string[]): Record<string, number> {
+  const out: Record<string, number> = {};
+  const set = db.prepare("UPDATE messages SET viewed_at = unixepoch() WHERE chat_id = ? AND id = ? AND viewed_at IS NULL");
+  const get = db.prepare<[string, string], { viewed_at: number | null }>("SELECT viewed_at FROM messages WHERE chat_id = ? AND id = ?");
+  db.transaction(() => {
+    for (const id of ids.slice(0, 200)) {
+      set.run(chatId, id);
+      const v = get.get(chatId, id)?.viewed_at;
+      if (v != null) out[id] = v;
+    }
+  })();
+  return out;
+}
+
 /** True for a filtered number's chat (hidden unless the secret code is typed). */
 export function isHiddenChat(chatId: string): boolean {
   return Boolean(db.prepare(`SELECT 1 FROM (${HIDDEN_SQL}) WHERE pn = ? LIMIT 1`).get(chatId));
@@ -162,7 +189,7 @@ export function listChats(opts: { hidden?: boolean } = {}): ChatListItem[] {
               m.is_deleted AS m_deleted, m.sender_jid AS m_sender, m.sender_name AS m_sender_name, m.file_name AS m_file
        FROM chats c
        LEFT JOIN messages m ON m.rowid = (
-         SELECT rowid FROM messages WHERE chat_id = c.id AND type != 'system' ORDER BY ts DESC LIMIT 1
+         SELECT rowid FROM messages WHERE chat_id = c.id AND type != 'system'${opts.hidden ? ` AND ${STILL_SHOWN}` : ""} ORDER BY ts DESC LIMIT 1
        )
        WHERE c.id NOT LIKE '%@broadcast' AND c.id NOT LIKE '%@newsletter'
          AND c.id ${opts.hidden ? "IN" : "NOT IN"} (${HIDDEN_SQL})
@@ -270,6 +297,7 @@ export interface MessageDTO {
   deletedAt: number | null;
   isEdited: boolean;
   removedFromPhone: boolean;
+  viewedAt: number | null;
   editHistory: { text: string | null; ts: number }[];
   reactions: { emoji: string; count: number; mine: boolean }[];
 }
@@ -312,6 +340,7 @@ export function toDTO(r: MessageRow): MessageDTO {
     deletedAt: r.deleted_at,
     isEdited: !!r.is_edited,
     removedFromPhone: !!r.removed_from_phone,
+    viewedAt: r.viewed_at,
     editHistory: r.edit_history ? JSON.parse(r.edit_history) : [],
     reactions: [...counts.entries()].map(([emoji, v]) => ({ emoji, ...v })),
   };
@@ -332,11 +361,11 @@ function quotedSender(r: MessageRow): string {
 
 const COLS = `chat_id, id, from_me, sender_jid, sender_name, ts, type, text, media_key, media_mime, media_size,
   media_seconds, media_status, media_width, media_height, thumbnail, file_name, quoted_id, quoted_text,
-  quoted_sender, status, is_deleted, deleted_at, is_edited, edit_history, reactions, raw, created_at, removed_from_phone`;
+  quoted_sender, status, is_deleted, deleted_at, is_edited, edit_history, reactions, raw, created_at, removed_from_phone, viewed_at`;
 
 export function listMessages(
   chatId: string,
-  opts: { before?: number; after?: number; limit?: number; onlyDeleted?: boolean } = {},
+  opts: { before?: number; after?: number; limit?: number; onlyDeleted?: boolean; hideViewed?: boolean } = {},
 ) {
   const limit = Math.min(opts.limit || 50, 200);
   const where = ["chat_id = ?"];
@@ -350,6 +379,7 @@ export function listMessages(
     args.push(opts.after);
   }
   if (opts.onlyDeleted) where.push("is_deleted = 1");
+  if (opts.hideViewed) where.push(STILL_SHOWN);
   const asc = Boolean(opts.after && !opts.before);
   const rows = db
     .prepare(

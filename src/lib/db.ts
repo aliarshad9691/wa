@@ -52,6 +52,7 @@ export interface MessageRow {
   raw: Buffer | null;
   created_at: number;
   removed_from_phone: number; // 1 = auto-deleted from WhatsApp (kept here)
+  viewed_at: number | null; // unix s when first shown on screen in the app
 }
 
 export interface ChatRow {
@@ -164,18 +165,21 @@ function open(): Database.Database {
       calls_rejected INTEGER NOT NULL DEFAULT 0
     );
   `);
-  // Lightweight migrations for columns added after first release.
-  const cols = new Set((db.prepare("PRAGMA table_info(messages)").all() as { name: string }[]).map((c) => c.name));
-  if (!cols.has("removed_from_phone")) {
-    db.exec("ALTER TABLE messages ADD COLUMN removed_from_phone INTEGER NOT NULL DEFAULT 0");
-  }
-  const chatCols = new Set((db.prepare("PRAGMA table_info(chats)").all() as { name: string }[]).map((c) => c.name));
-  if (!chatCols.has("read_receipts")) {
-    db.exec("ALTER TABLE chats ADD COLUMN read_receipts INTEGER NOT NULL DEFAULT 0");
-  }
-  if (!chatCols.has("receipts_ts")) {
-    db.exec("ALTER TABLE chats ADD COLUMN receipts_ts INTEGER NOT NULL DEFAULT 0");
-  }
+  // Lightweight migrations for columns added after first release. `next build` opens the DB in
+  // several workers at once, so two can race to add the same column: ignore "duplicate column".
+  const addColumn = (table: string, column: string, ddl: string) => {
+    const cols = new Set((db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[]).map((c) => c.name));
+    if (cols.has(column)) return;
+    try {
+      db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${ddl}`);
+    } catch (e) {
+      if (!/duplicate column name/i.test((e as Error).message)) throw e;
+    }
+  };
+  addColumn("messages", "removed_from_phone", "INTEGER NOT NULL DEFAULT 0");
+  addColumn("messages", "viewed_at", "INTEGER"); // unix s, first time shown on screen in the app
+  addColumn("chats", "read_receipts", "INTEGER NOT NULL DEFAULT 0");
+  addColumn("chats", "receipts_ts", "INTEGER NOT NULL DEFAULT 0");
   return db;
 }
 
