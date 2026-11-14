@@ -1,10 +1,8 @@
 import { NextResponse } from "next/server";
 import { requireChat } from "@/lib/session";
-import { wa } from "@/lib/wa/manager";
 import { decodeParam } from "@/lib/params";
 import { toVoiceNote } from "@/lib/audio";
 import { grantHistory, isSecret } from "@/lib/hidden";
-import { isHiddenChat } from "@/lib/wa/repo";
 
 const MAX_BYTES = 100 * 1024 * 1024;
 
@@ -16,7 +14,7 @@ const MAX_BYTES = 100 * 1024 * 1024;
  *   quotedId  – optional id of the message being replied to
  */
 export async function POST(req: Request, { params }: { params: Promise<{ id: string }> }) {
-  const { user, deny } = await requireChat(decodeParam((await params).id));
+  const { user, acct, deny } = await requireChat(decodeParam((await params).id));
   if (deny) return deny;
   const chatId = decodeParam((await params).id);
   try {
@@ -29,9 +27,9 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     // The secret code is never sent to WhatsApp (not even as a caption). In a hidden chat it
     // shows that chat's full history instead, including messages hidden after being viewed.
     if (isSecret(text)) {
-      if (!isHiddenChat(chatId) || !user.email) return NextResponse.json({ secret: true });
+      if (!acct.repo.isHiddenChat(chatId) || !user.email) return NextResponse.json({ secret: true });
       const res = NextResponse.json({ secret: true, revealed: true });
-      grantHistory(res, user.email, chatId);
+      grantHistory(res, user.email, acct.id, chatId);
       return res;
     }
 
@@ -42,10 +40,10 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
       if (mode === "voice") {
         const v = await toVoiceNote(buffer);
         buffer = v.buffer;
-        const id = await wa.sendMedia(chatId, { buffer, mime: "audio/ogg", name: "voice.ogg" }, { voice: { seconds: v.seconds }, quotedId });
+        const id = await acct.wa.sendMedia(chatId, { buffer, mime: "audio/ogg", name: "voice.ogg" }, { voice: { seconds: v.seconds }, quotedId });
         return NextResponse.json({ id });
       }
-      const id = await wa.sendMedia(
+      const id = await acct.wa.sendMedia(
         chatId,
         { buffer, mime, name: file.name || "file" },
         { caption: text || undefined, asDocument: mode === "document", quotedId },
@@ -54,7 +52,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     }
 
     if (!text) return NextResponse.json({ error: "Nothing to send" }, { status: 400 });
-    const id = await wa.sendText(chatId, text, quotedId);
+    const id = await acct.wa.sendText(chatId, text, quotedId);
     return NextResponse.json({ id });
   } catch (e) {
     console.error("[send]", e);

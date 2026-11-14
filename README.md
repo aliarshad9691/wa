@@ -5,6 +5,9 @@ message, including ones deleted for everyone**.
 
 - **Login**: Google only (Auth.js), limited to `ALLOWED_EMAILS`.
 - **Linking**: Settings → *Linked phone* → scan the QR code, or link with a phone-number pairing code.
+- **Several numbers, one login**: the bar on the right edge lists every linked WhatsApp number. Click one to switch
+  (the whole app reloads for it), or **+** to add another and scan its QR code. Each number has its own chats,
+  filtered numbers, alerts, hidden chats and settings, and all of them stay connected in the background.
 - **Sync**: full history sync when you link, then live updates. *Load older messages from phone* in a chat asks the phone for more.
 - **Storage**: messages, chats and contacts go in **SQLite** (`data/app.db`). Media (photos, videos, voice notes, audio, documents, stickers) goes in **S3** (or R2, MinIO and other S3-compatible services).
 - **Send**: text, photos, videos, audio files, documents, and voice notes recorded in the browser (converted to OGG/Opus with ffmpeg). Also replies and reactions.
@@ -68,11 +71,13 @@ Without the proxy stack, drop the `networks` block and publish the port instead 
 
 | Piece | File |
 | --- | --- |
-| WhatsApp connection, history sync, live events, media → S3 queue, sending | `src/lib/wa/manager.ts` (uses [Baileys](https://github.com/WhiskeySockets/Baileys)) |
+| Accounts (one per linked number): registry, folders, boot | `src/lib/accounts.ts` |
+| WhatsApp connection, history sync, live events, media → S3 queue, sending (one instance per account) | `src/lib/wa/manager.ts` (uses [Baileys](https://github.com/WhiskeySockets/Baileys)) |
 | Message parsing (text/media/revoke/edit/reaction) | `src/lib/wa/parse.ts` |
-| SQLite persistence; the "never delete" rules | `src/lib/wa/repo.ts`, `src/lib/db.ts` |
+| SQLite persistence; the "never delete" rules (`createRepo(db)` per account) | `src/lib/wa/repo.ts`, `src/lib/db.ts` |
 | S3 / local media storage + presigned URLs | `src/lib/storage.ts` |
-| Auth (Google), route protection | `src/auth.ts`, `src/proxy.ts`, `src/lib/session.ts` |
+| Auth (Google), route protection, which account a request is for | `src/auth.ts`, `src/proxy.ts`, `src/lib/session.ts` |
+| Account switcher (right edge) and per-request account scoping in the browser | `src/components/AccountRail.tsx`, `src/components/account.ts` |
 | Realtime to the browser (Server-Sent Events) | `src/app/api/events/route.ts` |
 | UI | `src/components/*` |
 
@@ -80,11 +85,23 @@ How a deletion is handled: WhatsApp sends a *revoke* protocol message, which Bai
 
 The WhatsApp session keys live in `data/wa-auth/`. Back up `data/` (it holds the SQLite database and the session) and protect it like a password.
 
+### Multiple accounts
+
+Each linked number is an *account* with its own folder: the first one (`main`) uses `data/` itself (`data/app.db`,
+`data/wa-auth/`), so an existing install keeps working unchanged; each added number gets `data/accounts/<id>/`
+with its own `app.db` and `wa-auth/`. `data/accounts.json` lists them. Every account connects at boot.
+
+The browser names its account on every API call (`x-wa-account` header, or `?a=<id>` for EventSource and
+media/avatar URLs), so a tab left open on one number never reads from or sends as another. A remembered cookie
+only picks which account opens on page load. Hidden-chat unlocks are signed per account. Media of added accounts
+is stored under `accounts/<id>/media/` in the bucket. Removing an account (its Settings → *Remove account*)
+unlinks the phone and moves its folder to `data/removed-accounts/`; the first account can only be unlinked.
+
 ## Notes and limitations
 
 - This uses an **unofficial** WhatsApp Web protocol library. It's widely used, but WhatsApp could change things or restrict accounts that use unofficial clients. Use it with your own account, at your own risk.
 - WhatsApp currently rejects the "Desktop" companion identity (HTTP 428), so the app links as a desktop **Chrome** browser and still requests a full history sync. How much history the phone sends is up to the phone. Use *Load older messages from phone* for more. You can override the identity with `WA_BROWSER`.
-- One linked WhatsApp account per deployment. Every allowed login sees the same account.
+- Every allowed login sees all linked numbers.
 - Deleting a message from this app, calls, status/stories and channels are not implemented.
 - Switching the media backend (local ↔ S3) does not move media that's already stored.
 

@@ -1,11 +1,10 @@
 import { NextResponse } from "next/server";
 import { requireChat } from "@/lib/session";
-import { wa } from "@/lib/wa/manager";
 import { decodeParam } from "@/lib/params";
 
 export async function POST(_req: Request, { params }: { params: Promise<{ id: string }> }) {
-  const { deny } = await requireChat(decodeParam((await params).id));
+  const { acct, deny } = await requireChat(decodeParam((await params).id));
   if (deny) return deny;
-  await wa.markRead(decodeParam((await params).id));
+  await acct.wa.markRead(decodeParam((await params).id));
   return NextResponse.json({ ok: true });
 }

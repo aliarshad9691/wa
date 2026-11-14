@@ -3,7 +3,6 @@ import path from "node:path";
 import { NextResponse } from "next/server";
 import { proto, type WAMessage } from "baileys";
 import { requireUser } from "@/lib/session";
-import { wa } from "@/lib/wa/manager";
 
 /**
  * DEV ONLY. Simulates incoming WhatsApp traffic so the UI and archive logic can be exercised
@@ -18,7 +17,7 @@ import { wa } from "@/lib/wa/manager";
  */
 export async function POST(req: Request) {
   if (process.env.NODE_ENV === "production") return NextResponse.json({ error: "not found" }, { status: 404 });
-  const { deny } = await requireUser();
+  const { acct, deny } = await requireUser();
   if (deny) return deny;
   const b = (await req.json()) as Record<string, string | number | boolean | undefined>;
   const chat = String(b.chat);
@@ -36,7 +35,7 @@ export async function POST(req: Request) {
 
   switch (b.action) {
     case "text":
-      wa.devIngest({ ...base, message: { extendedTextMessage: { text: String(b.text), contextInfo: ctx } } });
+      acct.wa.devIngest({ ...base, message: { extendedTextMessage: { text: String(b.text), contextInfo: ctx } } });
       break;
     case "media": {
       const buffer = fs.readFileSync(path.join(process.cwd(), "dev-fixtures", path.basename(String(b.file))));
@@ -58,18 +57,18 @@ export async function POST(req: Request) {
         default:
           message = { documentMessage: { ...common, fileName: String(b.fileName || "file.bin"), caption } };
       }
-      wa.devIngest({ ...base, message }, { buffer, mime });
+      acct.wa.devIngest({ ...base, message }, { buffer, mime });
       break;
     }
     case "revoke":
-      wa.devIngest({
+      acct.wa.devIngest({
         ...base,
         key: { ...key, id: id + "-revoke" },
         message: { protocolMessage: { type: proto.Message.ProtocolMessage.Type.REVOKE, key: { ...key } } },
       });
       break;
     case "edit":
-      wa.devIngest({
+      acct.wa.devIngest({
         ...base,
         key: { ...key, id: id + "-edit-" + ts },
         message: {
@@ -82,7 +81,7 @@ export async function POST(req: Request) {
       });
       break;
     case "react":
-      wa.devIngest({
+      acct.wa.devIngest({
         ...base,
         key: { ...key, id: id + "-react-" + ts },
         message: { reactionMessage: { key: { ...key }, text: String(b.emoji || "") } },

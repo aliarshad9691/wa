@@ -1,7 +1,6 @@
 import { NextResponse } from "next/server";
 import { requireUser } from "@/lib/session";
 import { grantUnlock, revokeHistory, revokeUnlock } from "@/lib/hidden";
-import { listChats } from "@/lib/wa/repo";
 
 /**
  * Filtered numbers' chats are hidden from the sidebar. They are returned here only when the
@@ -9,13 +8,13 @@ import { listChats } from "@/lib/wa/repo";
  * A match also sets the unlock cookie that the chat APIs require for those chats.
  */
 export async function GET(req: Request) {
-  const { user, deny } = await requireUser();
+  const { user, acct, deny } = await requireUser();
   if (deny) return deny;
   const code = process.env.HIDDEN_CHATS_CODE?.trim();
   const q = new URL(req.url).searchParams.get("code")?.trim();
   if (!code || q !== code || !user.email) return NextResponse.json({ chats: [] });
-  const res = NextResponse.json({ chats: listChats({ hidden: true }) });
-  grantUnlock(res, user.email);
+  const res = NextResponse.json({ chats: acct.repo.listChats({ hidden: true }) });
+  grantUnlock(res, user.email, acct.id);
   return res;
 }
 

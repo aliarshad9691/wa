@@ -1,12 +1,13 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
-import { ArrowLeft, Database, HardDrive, LoaderCircle, LogOut, RefreshCw, Smartphone } from "lucide-react";
+import { ArrowLeft, Database, HardDrive, LoaderCircle, LogOut, RefreshCw, Smartphone, Trash2 } from "lucide-react";
 import FilteredNumbers from "./FilteredNumbers";
 import AlertSettings from "./AlertSettings";
 import Avatar from "./Avatar";
 import type { SessionUser, WAState } from "./types";
 import { phoneOf } from "./util";
 import { signOutAction } from "@/app/actions";
+import type { AccountSummary } from "./account";
 
 interface StorageInfo {
   backend: "s3" | "local";
@@ -15,7 +16,20 @@ interface StorageInfo {
   bucket?: string;
 }
 
-export default function SettingsPanel({ user, wa, onBack }: { user: SessionUser; wa: WAState; onBack: () => void }) {
+export default function SettingsPanel({
+  user,
+  wa,
+  account,
+  accountCount,
+  onBack,
+}: {
+  user: SessionUser;
+  wa: WAState;
+  /** The WhatsApp account these settings belong to (each number has its own). */
+  account: AccountSummary | null;
+  accountCount: number;
+  onBack: () => void;
+}) {
   const [storage, setStorage] = useState<StorageInfo | null>(null);
   const [busy, setBusy] = useState(false);
   const [phoneMode, setPhoneMode] = useState(false);
@@ -61,6 +75,20 @@ export default function SettingsPanel({ user, wa, onBack }: { user: SessionUser;
     }
   }
 
+  async function removeAccount() {
+    if (!account) return;
+    const what = account.phone || "this account";
+    if (!confirm(`Remove ${what}? The phone is unlinked and the account leaves the list. Its archived messages are kept on the server.`)) return;
+    setBusy(true);
+    try {
+      const r = await fetch(`/api/accounts?id=${encodeURIComponent(account.id)}`, { method: "DELETE" });
+      if (r.ok) window.location.replace(window.location.pathname + "?a=main");
+      else alert(((await r.json().catch(() => ({}))) as { error?: string }).error || "Could not remove the account");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
     <div className="flex h-full flex-col bg-panel">
       <header className="flex h-[108px] shrink-0 items-end bg-accent-strong px-6 pb-4 text-white dark:bg-panel-header">
@@ -68,7 +96,16 @@ export default function SettingsPanel({ user, wa, onBack }: { user: SessionUser;
           <button onClick={onBack} title="Back" aria-label="Back" className="-m-2 rounded-full p-2">
             <ArrowLeft size={24} />
           </button>
-          <h1 className="text-[19px] font-medium">Settings</h1>
+          <div className="min-w-0">
+            <h1 className="text-[19px] font-medium">Settings</h1>
+            {accountCount > 1 && account && (
+              <div className="truncate text-[13px] opacity-80">
+                {!account.phone
+                  ? "For the new number you're linking"
+                  : `For ${account.label === account.phone ? account.phone : `${account.label} · ${account.phone}`} only`}
+              </div>
+            )}
+          </div>
         </div>
       </header>
 
@@ -207,6 +244,21 @@ export default function SettingsPanel({ user, wa, onBack }: { user: SessionUser;
             <dd className="text-right text-fg">{wa.media.failed}</dd>
           </dl>
         </Section>
+
+        {account && account.id !== "main" && (
+          <Section icon={<Trash2 size={20} />} title="This account">
+            <p className="mb-3 text-[14px] text-muted">
+              Unlinks the phone and removes this number from the account list. Its archived messages stay on the server.
+            </p>
+            <button
+              onClick={() => void removeAccount()}
+              disabled={busy}
+              className="flex items-center gap-2 rounded-full border border-deleted-border px-4 py-2 text-[14px] text-deleted-fg hover:bg-deleted disabled:opacity-50"
+            >
+              <Trash2 size={16} /> Remove account
+            </button>
+          </Section>
+        )}
 
         <form action={signOutAction} className="px-6 py-6">
           <button className="flex items-center gap-3 text-[15px] text-deleted-fg hover:underline">

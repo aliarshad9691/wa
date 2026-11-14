@@ -79,12 +79,10 @@ export interface ContactRow {
   verified_name: string | null;
 }
 
-declare global {
-  var __waDb: Database.Database | undefined;
-}
-
-function open(): Database.Database {
-  const db = new Database(path.join(DATA_DIR, "app.db"));
+/** Opens (and migrates) one WhatsApp account's database at `<dir>/app.db`. */
+export function openDb(dir: string): Database.Database {
+  fs.mkdirSync(dir, { recursive: true });
+  const db = new Database(path.join(dir, "app.db"));
   db.pragma("journal_mode = WAL");
   db.pragma("synchronous = NORMAL");
   db.pragma("foreign_keys = ON");
@@ -183,16 +181,22 @@ function open(): Database.Database {
   return db;
 }
 
-export const db: Database.Database = globalThis.__waDb ?? (globalThis.__waDb = open());
-
-export function kvGet<T = unknown>(key: string): T | null {
-  const row = db.prepare("SELECT value FROM kv WHERE key = ?").get(key) as { value: string } | undefined;
-  return row ? (JSON.parse(row.value) as T) : null;
+export interface Kv {
+  get<T = unknown>(key: string): T | null;
+  set(key: string, value: unknown): void;
 }
 
-export function kvSet(key: string, value: unknown) {
-  db.prepare("INSERT INTO kv(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(
-    key,
-    JSON.stringify(value),
-  );
+/** Key/value settings stored in one account's database. */
+export function makeKv(db: Database.Database): Kv {
+  const get = db.prepare<[string], { value: string }>("SELECT value FROM kv WHERE key = ?");
+  const set = db.prepare("INSERT INTO kv(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value");
+  return {
+    get<T = unknown>(key: string) {
+      const row = get.get(key);
+      return row ? (JSON.parse(row.value) as T) : null;
+    },
+    set(key: string, value: unknown) {
+      set.run(key, JSON.stringify(value));
+    },
+  };
 }

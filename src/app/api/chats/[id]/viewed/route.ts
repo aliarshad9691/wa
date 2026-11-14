@@ -1,6 +1,5 @@
 import { NextResponse } from "next/server";
 import { requireChat } from "@/lib/session";
-import { isHiddenChat, markViewed } from "@/lib/wa/repo";
 import { decodeParam } from "@/lib/params";
 
 /**
@@ -9,10 +8,10 @@ import { decodeParam } from "@/lib/params";
  */
 export async function POST(req: Request, { params }: { params: Promise<{ id: string }> }) {
   const chatId = decodeParam((await params).id);
-  const { deny } = await requireChat(chatId);
+  const { acct, deny } = await requireChat(chatId);
   if (deny) return deny;
   const body = (await req.json().catch(() => null)) as { ids?: unknown } | null;
   const ids = Array.isArray(body?.ids) ? body.ids.filter((x): x is string => typeof x === "string") : [];
-  if (!isHiddenChat(chatId) || !ids.length) return NextResponse.json({ viewed: {} });
-  return NextResponse.json({ viewed: markViewed(chatId, ids) });
+  if (!acct.repo.isHiddenChat(chatId) || !ids.length) return NextResponse.json({ viewed: {} });
+  return NextResponse.json({ viewed: acct.repo.markViewed(chatId, ids) });
 }

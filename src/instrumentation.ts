@@ -1,6 +1,6 @@
 export async function register() {
   if (process.env.NEXT_RUNTIME === "nodejs") {
-    const { bootWhatsApp } = await import("./lib/wa/manager");
-    bootWhatsApp();
+    const { bootAccounts } = await import("./lib/accounts");
+    bootAccounts();
   }
 }

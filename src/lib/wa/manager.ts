@@ -25,10 +25,11 @@ import makeWASocket, {
   type WAMessage,
   type WASocket,
 } from "baileys";
-import { DATA_DIR, db, kvGet, kvSet, type MessageRow } from "../db";
+import type Database from "better-sqlite3";
+import type { Kv, MessageRow } from "../db";
 import { extFromMime, putMedia } from "../storage";
 import { parseMessage } from "./parse";
-import * as repo from "./repo";
+import type { Repo } from "./repo";
 
 export type WAStatus = "disconnected" | "connecting" | "qr" | "open";
 
@@ -48,20 +49,18 @@ export type WAEvent =
   | { type: "chats" }
   | { type: "history"; chatIds: string[] };
 
-const AUTH_DIR = path.join(DATA_DIR, "wa-auth");
-
 /** Id of the most recently created app-state sync key the phone has shared with us (by its own timestamp). */
-function newestAppStateKeyId(): string | null {
+function newestAppStateKeyId(authDir: string): string | null {
   let best: { id: string; ts: number } | null = null;
   let files: string[] = [];
   try {
-    files = fs.readdirSync(AUTH_DIR).filter((f) => f.startsWith("app-state-sync-key-") && f.endsWith(".json"));
+    files = fs.readdirSync(authDir).filter((f) => f.startsWith("app-state-sync-key-") && f.endsWith(".json"));
   } catch {
     return null;
   }
   for (const f of files) {
     try {
-      const j = JSON.parse(fs.readFileSync(path.join(AUTH_DIR, f), "utf8")) as { timestamp?: number | string | { low: number; high: number } };
+      const j = JSON.parse(fs.readFileSync(path.join(authDir, f), "utf8")) as { timestamp?: number | string | { low: number; high: number } };
       const t = j.timestamp;
       const ts = typeof t === "object" && t ? t.high * 2 ** 32 + (t.low >>> 0) : Number(t ?? 0);
       // file names encode ids filesystem-safely ("/" -> "__"); undo that
@@ -129,18 +128,26 @@ const DELETE_RESEND_WINDOW_S = 35 * 60;
 /** Cap on deletes re-sent after a reconnect. */
 const DELETE_RESEND_MAX = 20;
 
-class WhatsAppManager {
+/** What one WhatsApp account (one linked phone number) needs: its own database, settings and auth keys. */
+export interface AccountContext {
+  id: string;
+  /** Folder holding app.db and wa-auth/. */
+  dir: string;
+  db: Database.Database;
+  kv: Kv;
+  repo: Repo;
+}
+
+export class WhatsAppManager {
+  readonly id: string;
+  private readonly db: Database.Database;
+  private readonly kv: Kv;
+  private readonly repo: Repo;
+  private readonly authDir: string;
+  private readonly log: pino.Logger;
   sock: WASocket | null = null;
   bus = new EventEmitter();
-  state: WAState = {
-    status: "disconnected",
-    qr: null,
-    pairingCode: null,
-    me: null,
-    lastError: null,
-    sync: { active: false, progress: null, chats: 0, messages: 0, lastAt: kvGet<number>("lastSyncAt") },
-    media: { queued: 0, active: 0, failed: 0 },
-  };
+  state: WAState;
   private starting: Promise<void> | null = null;
   private reconnectTimer: NodeJS.Timeout | null = null;
   private retries = 0;
@@ -154,19 +161,35 @@ class WhatsAppManager {
   private mediaActive = 0;
   private wantPairingFor: string | null = null;
   /** Filtered phone-number JID -> when it was added (unix seconds). Only later messages are removed. */
-  private filtered = new Map<string, number>(repo.listFiltered().map((f) => [f.pn, f.created_at]));
+  private filtered: Map<string, number>;
   private autoRemoved = new Set<string>();
   /** Ids of messages sent from this app (not the phone); only these of my own messages are auto-removed. */
   private sentHere = new Set<string>();
   private lastAlertAt = 0;
   private rejectedCalls = new Set<string>();
 
-  constructor() {
+  constructor(ctx: AccountContext) {
+    this.id = ctx.id;
+    this.db = ctx.db;
+    this.kv = ctx.kv;
+    this.repo = ctx.repo;
+    this.authDir = path.join(ctx.dir, "wa-auth");
+    this.log = logger.child({ account: ctx.id });
     this.bus.setMaxListeners(100);
+    this.filtered = new Map(this.repo.listFiltered().map((f) => [f.pn, f.created_at]));
+    this.state = {
+      status: "disconnected",
+      qr: null,
+      pairingCode: null,
+      me: null,
+      lastError: null,
+      sync: { active: false, progress: null, chats: 0, messages: 0, lastAt: this.kv.get<number>("lastSyncAt") },
+      media: { queued: 0, active: 0, failed: 0 },
+    };
   }
 
   hasSession() {
-    return fs.existsSync(path.join(AUTH_DIR, "creds.json"));
+    return fs.existsSync(path.join(this.authDir, "creds.json"));
   }
 
   private setState(patch: Partial<WAState>) {
@@ -209,8 +232,8 @@ class WhatsAppManager {
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     const gen = ++this.generation;
     this.setState({ status: "connecting", qr: null, pairingCode: null, lastError: null });
-    fs.mkdirSync(AUTH_DIR, { recursive: true });
-    const { state, saveCreds } = await multiFileAuthState(AUTH_DIR);
+    fs.mkdirSync(this.authDir, { recursive: true });
+    const { state, saveCreds } = await multiFileAuthState(this.authDir);
     let version: [number, number, number] | undefined;
     try {
       version = (await fetchLatestBaileysVersion()).version;
@@ -223,15 +246,15 @@ class WhatsAppManager {
     const browserName = process.env.WA_BROWSER || "Chrome";
     const sock = makeWASocket({
       ...(version ? { version } : {}),
-      logger,
-      auth: { creds: state.creds, keys: makeCacheableSignalKeyStore(state.keys, logger) },
+      logger: this.log,
+      auth: { creds: state.creds, keys: makeCacheableSignalKeyStore(state.keys, this.log) },
       browser: Browsers.macOS(browserName),
       syncFullHistory: SYNC_FULL_HISTORY,
       markOnlineOnConnect: false,
       ...(SYNC_FULL_HISTORY ? { shouldSyncHistoryMessage: () => true } : {}),
       generateHighQualityLinkPreview: false,
       getMessage: async (key) => {
-        const row = key.id ? repo.findMessageById(key.id) : undefined;
+        const row = key.id ? this.repo.findMessageById(key.id) : undefined;
         if (!row?.raw) return undefined;
         try {
           return proto.WebMessageInfo.decode(row.raw).message || undefined;
@@ -248,9 +271,9 @@ class WhatsAppManager {
     // phone sent. A share right after linking contains every key, oldest ones last, so it picked a retired
     // key and the phone silently ignored every patch. Always use the newest key instead.
     const useNewestAppStateKey = () => {
-      const newest = newestAppStateKeyId();
+      const newest = newestAppStateKeyId(this.authDir);
       if (newest && state.creds.myAppStateKeyId !== newest) {
-        console.info("[appstate] using newest app-state key", { was: state.creds.myAppStateKeyId, now: newest });
+        console.info(`[${this.id}] [appstate] using newest app-state key`, { was: state.creds.myAppStateKeyId, now: newest });
         state.creds.myAppStateKeyId = newest;
         void saveCreds();
       }
@@ -271,7 +294,10 @@ class WhatsAppManager {
         this.retries = 0;
         this.wantPairingFor = null;
         const me = sock.user ? { id: jidNormalizedUser(sock.user.id), name: sock.user.name || null } : null;
-        if (me) kvSet("meJid", me.id);
+        if (me) {
+          this.kv.set("meJid", me.id);
+          this.kv.set("meName", me.name);
+        }
         this.setState({ status: "open", qr: null, pairingCode: null, me, lastError: null });
         // give the initial app-state sync a moment before patching
         setTimeout(() => void this.resendRecentDeletes(), 15_000).unref?.();
@@ -304,19 +330,19 @@ class WhatsAppManager {
       try {
         this.ingestHistory(h);
       } catch (e) {
-        logger.error(e, "history ingest failed");
+        this.log.error(e, "history ingest failed");
       }
     });
 
     sock.ev.on("messaging-history.status", (s) => {
       if (s.status === "complete") {
         this.setState({ sync: { ...this.state.sync, active: false, progress: 100, lastAt: Date.now() } });
-        kvSet("lastSyncAt", Date.now());
+        this.kv.set("lastSyncAt", Date.now());
       }
     });
 
     sock.ev.on("lid-mapping.update", (m) => {
-      repo.learnLid(m.lid, m.pn);
+      this.repo.learnLid(m.lid, m.pn);
       this.markChatsDirty();
     });
 
@@ -329,7 +355,7 @@ class WhatsAppManager {
           // (Baileys echoes those as "append"). Messages I send from the phone and history stay.
           if ((type === "notify" && !m.key.fromMe) || (type === "append" && m.key.fromMe)) void this.maybeAutoRemove(m);
         } catch (e) {
-          logger.error(e, "message ingest failed");
+          this.log.error(e, "message ingest failed");
         }
       }
     });
@@ -347,7 +373,7 @@ class WhatsAppManager {
         if (!chatId) continue;
         // Revoked ("deleted for everyone"): keep the content, just flag it.
         if (update.messageStubType === proto.WebMessageInfo.StubType.REVOKE) {
-          const row = repo.markDeleted(chatId, key.id, Math.floor(Date.now() / 1000), {
+          const row = this.repo.markDeleted(chatId, key.id, Math.floor(Date.now() / 1000), {
             from_me: key.fromMe ? 1 : 0,
             sender_jid: key.fromMe ? null : this.senderFor(key.participant, key.participantAlt) || chatId,
           });
@@ -357,11 +383,11 @@ class WhatsAppManager {
         const edited = update.message?.editedMessage?.message;
         if (edited) {
           const p = parseMessage({ key, message: edited } as WAMessage);
-          const row = repo.applyEdit(chatId, key.id, p?.text ?? null, Math.floor(Date.now() / 1000));
+          const row = this.repo.applyEdit(chatId, key.id, p?.text ?? null, Math.floor(Date.now() / 1000));
           if (row) this.emitMessage(row.chat_id, row.id, false);
         }
         if (typeof update.status === "number") {
-          const row = repo.setStatus(chatId, key.id, update.status);
+          const row = this.repo.setStatus(chatId, key.id, update.status);
           if (row) this.emitMessage(chatId, key.id, false);
         }
       }
@@ -373,7 +399,7 @@ class WhatsAppManager {
         const chatId = this.chatIdFor(key.remoteJid, key.remoteJidAlt);
         const fromMe = reaction.key?.fromMe;
         const sender = fromMe ? "me" : this.senderFor(reaction.key?.participant, null) || chatId || "unknown";
-        const row = repo.applyReaction(chatId, key.id, sender, reaction.text || "");
+        const row = this.repo.applyReaction(chatId, key.id, sender, reaction.text || "");
         if (row) this.emitMessage(row.chat_id, row.id, false);
       }
     });
@@ -388,7 +414,7 @@ class WhatsAppManager {
     });
 
     sock.ev.on("contacts.upsert", (cs) => {
-      db.transaction(() => cs.forEach((c) => this.ingestContact(c)))();
+      this.db.transaction(() => cs.forEach((c) => this.ingestContact(c)))();
       this.markChatsDirty();
     });
     sock.ev.on("contacts.update", (cs) => {
@@ -397,11 +423,11 @@ class WhatsAppManager {
     });
 
     sock.ev.on("groups.update", (gs) => {
-      for (const g of gs) if (g.id && g.subject) repo.upsertChatMeta(g.id, { name: g.subject });
+      for (const g of gs) if (g.id && g.subject) this.repo.upsertChatMeta(g.id, { name: g.subject });
       this.markChatsDirty();
     });
     sock.ev.on("groups.upsert", (gs) => {
-      for (const g of gs) repo.upsertChatMeta(g.id, { name: g.subject });
+      for (const g of gs) this.repo.upsertChatMeta(g.id, { name: g.subject });
       this.markChatsDirty();
     });
   }
@@ -409,23 +435,23 @@ class WhatsAppManager {
   private async afterOpen(sock: WASocket) {
     try {
       const groups = await sock.groupFetchAllParticipating();
-      db.transaction(() => {
-        for (const g of Object.values(groups)) repo.upsertChatMeta(g.id, { name: g.subject });
+      this.db.transaction(() => {
+        for (const g of Object.values(groups)) this.repo.upsertChatMeta(g.id, { name: g.subject });
       })();
       this.markChatsDirty();
     } catch (e) {
-      logger.warn(e, "group fetch failed");
+      this.log.warn(e, "group fetch failed");
     }
     // Resume any media that was not yet copied to storage, and give earlier failures one more try.
     const cutoff = mediaCutoffTs();
-    db.prepare("UPDATE messages SET media_status = 'skipped' WHERE media_status = 'pending' AND ts < ?").run(cutoff);
-    db.prepare("UPDATE messages SET media_status = 'pending' WHERE media_status = 'failed' AND raw IS NOT NULL AND ts >= ?").run(cutoff);
+    this.db.prepare("UPDATE messages SET media_status = 'skipped' WHERE media_status = 'pending' AND ts < ?").run(cutoff);
+    this.db.prepare("UPDATE messages SET media_status = 'pending' WHERE media_status = 'failed' AND raw IS NOT NULL AND ts >= ?").run(cutoff);
     this.mediaQueue = this.mediaQueue.filter((j) => {
-      const keep = (repo.getMessage(j.chatId, j.id)?.ts ?? 0) >= cutoff;
+      const keep = (this.repo.getMessage(j.chatId, j.id)?.ts ?? 0) >= cutoff;
       if (!keep) this.mediaQueued.delete(j.chatId + "|" + j.id);
       return keep;
     });
-    for (const r of repo.pendingMedia(20000)) this.enqueueMedia(r.chat_id, r.id);
+    for (const r of this.repo.pendingMedia(20000)) this.enqueueMedia(r.chat_id, r.id);
   }
 
   private async requestPairing() {
@@ -445,28 +471,28 @@ class WhatsAppManager {
     if (!remoteJid) return null;
     if (isJidStatusBroadcast(remoteJid) || isJidBroadcast(remoteJid) || isJidNewsletter(remoteJid)) return null;
     if (isLidUser(remoteJid) && alt && isPnUser(alt)) {
-      repo.learnLid(remoteJid, alt);
+      this.repo.learnLid(remoteJid, alt);
       return jidNormalizedUser(alt);
     }
-    if (isPnUser(remoteJid) && alt && isLidUser(alt)) repo.learnLid(alt, remoteJid);
-    return repo.normJid(remoteJid);
+    if (isPnUser(remoteJid) && alt && isLidUser(alt)) this.repo.learnLid(alt, remoteJid);
+    return this.repo.normJid(remoteJid);
   }
 
   private senderFor(participant?: string | null, alt?: string | null): string | null {
     if (!participant) return null;
     if (isLidUser(participant) && alt && isPnUser(alt)) {
-      repo.learnLid(participant, alt);
+      this.repo.learnLid(participant, alt);
       return jidNormalizedUser(alt);
     }
-    return repo.normJid(participant);
+    return this.repo.normJid(participant);
   }
 
   private ingestContact(c: { id: string; lid?: string; phoneNumber?: string; name?: string; notify?: string; verifiedName?: string }) {
-    if (c.lid && c.phoneNumber) repo.learnLid(c.lid, c.phoneNumber);
-    if (isLidUser(c.id) && c.phoneNumber) repo.learnLid(c.id, c.phoneNumber);
-    const id = c.phoneNumber && isPnUser(c.phoneNumber) ? jidNormalizedUser(c.phoneNumber) : repo.normJid(c.id);
+    if (c.lid && c.phoneNumber) this.repo.learnLid(c.lid, c.phoneNumber);
+    if (isLidUser(c.id) && c.phoneNumber) this.repo.learnLid(c.id, c.phoneNumber);
+    const id = c.phoneNumber && isPnUser(c.phoneNumber) ? jidNormalizedUser(c.phoneNumber) : this.repo.normJid(c.id);
     if (!id || isJidGroup(id)) return;
-    repo.upsertContact({ id, name: c.name, notify: c.notify, verifiedName: c.verifiedName });
+    this.repo.upsertContact({ id, name: c.name, notify: c.notify, verifiedName: c.verifiedName });
   }
 
   private ingestChat(
@@ -484,12 +510,12 @@ class WhatsAppManager {
     full: boolean,
   ) {
     if (!c.id) return;
-    if (c.pnJid && c.lidJid) repo.learnLid(c.lidJid, c.pnJid);
+    if (c.pnJid && c.lidJid) this.repo.learnLid(c.lidJid, c.pnJid);
     const id = this.chatIdFor(c.id, c.pnJid);
     if (!id) return;
     const ts = Number((c.conversationTimestamp as { toString(): string } | null | undefined)?.toString() || 0);
     const mute = Number((c.muteEndTime as { toString(): string } | null | undefined)?.toString() || 0);
-    repo.upsertChatMeta(id, {
+    this.repo.upsertChatMeta(id, {
       name: isJidGroup(id) ? c.name : c.name || null,
       // Live chats.update can carry relative counts; only trust absolute values from full upserts,
       // or a zero (chat read on the phone).
@@ -509,8 +535,8 @@ class WhatsAppManager {
     progress?: number | null;
     isLatest?: boolean;
   }) {
-    db.transaction(() => {
-      for (const m of h.lidPnMappings || []) repo.learnLid(m.lid, m.pn);
+    this.db.transaction(() => {
+      for (const m of h.lidPnMappings || []) this.repo.learnLid(m.lid, m.pn);
       for (const c of h.contacts) this.ingestContact(c);
       for (const c of h.chats) this.ingestChat(c, true);
       for (const m of h.messages) this.ingestMessage(m, { live: false, quiet: true });
@@ -524,7 +550,7 @@ class WhatsAppManager {
         lastAt: Date.now(),
       },
     });
-    kvSet("lastSyncAt", Date.now());
+    this.kv.set("lastSyncAt", Date.now());
     this.bus.emit("event", { type: "chats" } satisfies WAEvent);
     const chatIds = [...new Set(h.messages.map((m) => this.chatIdFor(m.key?.remoteJid, m.key?.remoteJidAlt)).filter(Boolean))] as string[];
     if (chatIds.length) this.bus.emit("event", { type: "history", chatIds } satisfies WAEvent);
@@ -536,7 +562,7 @@ class WhatsAppManager {
     const chatId = this.chatIdFor(key.remoteJid, key.remoteJidAlt);
     if (!chatId) return;
     const sender = key.fromMe ? null : isJidGroup(chatId) ? this.senderFor(key.participant, key.participantAlt) : chatId;
-    if (sender && m.pushName && !key.fromMe) repo.upsertContact({ id: sender, notify: m.pushName });
+    if (sender && m.pushName && !key.fromMe) this.repo.upsertContact({ id: sender, notify: m.pushName });
 
     const p = parseMessage(m);
     if (!p) return;
@@ -547,11 +573,11 @@ class WhatsAppManager {
       const c = p.control;
       let row: MessageRow | null = null;
       if (c.kind === "revoke") {
-        row = repo.markDeleted(chatId, c.targetId, p.ts || nowTs, { from_me: p.from_me, sender_jid: sender, ts: p.ts });
+        row = this.repo.markDeleted(chatId, c.targetId, p.ts || nowTs, { from_me: p.from_me, sender_jid: sender, ts: p.ts });
       } else if (c.kind === "edit") {
-        row = repo.applyEdit(chatId, c.targetId, c.text, p.ts || nowTs);
+        row = this.repo.applyEdit(chatId, c.targetId, c.text, p.ts || nowTs);
       } else if (c.kind === "reaction" && c.targetId) {
-        row = repo.applyReaction(chatId, c.targetId, key.fromMe ? "me" : sender || chatId, c.emoji);
+        row = this.repo.applyReaction(chatId, c.targetId, key.fromMe ? "me" : sender || chatId, c.emoji);
       }
       if (row && !opts.quiet) this.emitMessage(row.chat_id, row.id, false);
       return;
@@ -567,11 +593,11 @@ class WhatsAppManager {
         raw = null;
       }
     }
-    const { row, isNew } = repo.upsertMessage(chatId, p, { senderName: m.pushName || null, raw, revokedStub });
+    const { row, isNew } = this.repo.upsertMessage(chatId, p, { senderName: m.pushName || null, raw, revokedStub });
     if (isNew && p.type !== "system") {
-      repo.touchChat(chatId, p.ts, opts.live && !key.fromMe);
+      this.repo.touchChat(chatId, p.ts, opts.live && !key.fromMe);
     } else if (isNew) {
-      repo.touchChat(chatId, 0, false);
+      this.repo.touchChat(chatId, 0, false);
     }
     if (row.media_status === "pending") {
       const own = this.outgoingMedia.get(row.id);
@@ -586,7 +612,7 @@ class WhatsAppManager {
         }
       } else if (!opts.live && row.ts < mediaCutoffTs()) {
         // Old media from history sync: keep the message, fetch the file only when asked.
-        repo.setMedia(chatId, row.id, { status: "skipped" });
+        this.repo.setMedia(chatId, row.id, { status: "skipped" });
       } else {
         this.enqueueMedia(chatId, row.id, opts.live);
       }
@@ -598,17 +624,19 @@ class WhatsAppManager {
 
   private mediaKey(row: MessageRow, mime: string) {
     const safeChat = row.chat_id.replace(/[^a-zA-Z0-9@._-]/g, "_");
-    return `media/${safeChat}/${row.id}.${extFromMime(mime)}`;
+    // The first account keeps the original layout; later ones get their own prefix.
+    const prefix = this.id === "main" ? "" : `accounts/${this.id}/`;
+    return `${prefix}media/${safeChat}/${row.id}.${extFromMime(mime)}`;
   }
 
   private async storeOwnMedia(row: MessageRow, buffer: Buffer, mime: string) {
     try {
       const key = this.mediaKey(row, mime);
       await putMedia(key, buffer, mime);
-      repo.setMedia(row.chat_id, row.id, { status: "ready", key, mime, size: buffer.length });
+      this.repo.setMedia(row.chat_id, row.id, { status: "ready", key, mime, size: buffer.length });
     } catch (e) {
-      logger.error(e, "store own media failed");
-      repo.setMedia(row.chat_id, row.id, { status: "failed" });
+      this.log.error(e, "store own media failed");
+      this.repo.setMedia(row.chat_id, row.id, { status: "failed" });
     }
     this.emitMessage(row.chat_id, row.id, false);
   }
@@ -653,19 +681,19 @@ class WhatsAppManager {
     if (this.mediaStateTimer) return;
     this.mediaStateTimer = setTimeout(() => {
       this.mediaStateTimer = null;
-      const failed = (db.prepare("SELECT COUNT(*) n FROM messages WHERE media_status = 'failed'").get() as { n: number }).n;
+      const failed = (this.db.prepare("SELECT COUNT(*) n FROM messages WHERE media_status = 'failed'").get() as { n: number }).n;
       this.setState({ media: { queued: this.mediaQueue.length, active: this.mediaActive, failed } });
     }, 1000);
   }
 
   async downloadMedia(chatId: string, id: string) {
-    const row = repo.getMessage(chatId, id);
+    const row = this.repo.getMessage(chatId, id);
     if (!row || !row.raw || row.media_status === "ready") return;
     let msg: WAMessage;
     try {
       msg = proto.WebMessageInfo.decode(row.raw) as WAMessage;
     } catch {
-      repo.setMedia(chatId, id, { status: "failed" });
+      this.repo.setMedia(chatId, id, { status: "failed" });
       return;
     }
     try {
@@ -681,7 +709,7 @@ class WhatsAppManager {
         // The phone may never answer a re-upload request (media deleted on it, phone offline); without
         // a timeout this would hold a queue slot forever and, once every slot is held, stall all media.
         msg = await withTimeout(sock.updateMediaMessage(msg), 60_000);
-        db.prepare("UPDATE messages SET raw = ? WHERE chat_id = ? AND id = ?").run(
+        this.db.prepare("UPDATE messages SET raw = ? WHERE chat_id = ? AND id = ?").run(
           Buffer.from(proto.WebMessageInfo.encode(msg).finish()),
           chatId,
           id,
@@ -691,18 +719,18 @@ class WhatsAppManager {
       const mime = (row.media_mime || "application/octet-stream").split(";")[0];
       const key = this.mediaKey(row, mime);
       await putMedia(key, buffer, row.media_mime || mime);
-      repo.setMedia(chatId, id, { status: "ready", key, size: buffer.length });
+      this.repo.setMedia(chatId, id, { status: "ready", key, size: buffer.length });
     } catch (e) {
-      logger.warn({ err: (e as Error).message, code: (e as Boom).output?.statusCode, chatId, id }, "media download failed");
-      repo.setMedia(chatId, id, { status: "failed" });
+      this.log.warn({ err: (e as Error).message, code: (e as Boom).output?.statusCode, chatId, id }, "media download failed");
+      this.repo.setMedia(chatId, id, { status: "failed" });
     }
     this.emitMessage(chatId, id, false);
   }
 
   retryMedia(chatId: string, id: string) {
-    const row = repo.getMessage(chatId, id);
+    const row = this.repo.getMessage(chatId, id);
     if (!row || !row.raw) return false;
-    repo.setMedia(chatId, id, { status: "pending" });
+    this.repo.setMedia(chatId, id, { status: "pending" });
     this.enqueueMedia(chatId, id, true);
     this.emitMessage(chatId, id, false);
     return true;
@@ -721,7 +749,7 @@ class WhatsAppManager {
   /* ------------------------------------------------- filtered numbers */
 
   reloadFiltered() {
-    this.filtered = new Map(repo.listFiltered().map((f) => [f.pn, f.created_at]));
+    this.filtered = new Map(this.repo.listFiltered().map((f) => [f.pn, f.created_at]));
     this.markChatsDirty(); // filtered chats are hidden from the sidebar
   }
 
@@ -732,13 +760,13 @@ class WhatsAppManager {
     const n = jidNormalizedUser(jid);
     if (isPnUser(n)) return n;
     if (isLidUser(n)) {
-      const known = repo.normJid(n);
+      const known = this.repo.normJid(n);
       if (known && isPnUser(known)) return known;
       try {
         const pn = await this.sock?.signalRepository.lidMapping.getPNForLID(n);
         if (pn) {
           const p = jidNormalizedUser(pn);
-          repo.learnLid(n, p);
+          this.repo.learnLid(n, p);
           return p;
         }
       } catch {
@@ -752,19 +780,19 @@ class WhatsAppManager {
     if (!this.filtered.size || this.rejectedCalls.has(c.id)) return;
     const pn = await this.toPn(c.from, c.callerPn);
     if (!pn || !this.filtered.has(pn)) return;
-    console.info("[filter] rejecting call", { status: "offer", video: Boolean(c.isVideo) });
+    console.info(`[${this.id}] [filter] rejecting call`, { status: "offer", video: Boolean(c.isVideo) });
     this.rejectedCalls.add(c.id);
     try {
       await sock.rejectCall(c.id, c.from);
     } catch (e) {
       this.rejectedCalls.delete(c.id);
-      logger.error({ err: (e as Error).message, callId: c.id }, "auto-reject call failed");
+      this.log.error({ err: (e as Error).message, callId: c.id }, "auto-reject call failed");
       return;
     }
-    repo.bumpFiltered(pn, "calls_rejected");
+    this.repo.bumpFiltered(pn, "calls_rejected");
     const ts = Math.floor((c.date?.getTime?.() || Date.now()) / 1000);
-    const row = repo.insertSystemMessage(pn, `call-${c.id}`, ts, `📵 ${c.isVideo ? "Video call" : "Voice call"} rejected automatically`);
-    repo.touchChat(pn, ts, false);
+    const row = this.repo.insertSystemMessage(pn, `call-${c.id}`, ts, `📵 ${c.isVideo ? "Video call" : "Voice call"} rejected automatically`);
+    this.repo.touchChat(pn, ts, false);
     if (row) this.emitMessage(pn, row.id, true);
   }
 
@@ -796,25 +824,25 @@ class WhatsAppManager {
     const chatId = this.chatIdFor(m.key.remoteJid, m.key.remoteJidAlt);
     if (!chatId) return;
     // Media must be safely in storage before WhatsApp forgets it.
-    let row = repo.getMessage(chatId, m.key.id);
+    let row = this.repo.getMessage(chatId, m.key.id);
     if (row?.media_status === "pending" && (this.storingOwn.has(m.key.id) || this.outgoingMedia.has(m.key.id))) {
       // Sent from this app: the upload of our own bytes is already under way; wait for it.
-      for (let i = 0; i < 240 && repo.getMessage(chatId, m.key.id)?.media_status === "pending"; i++) {
+      for (let i = 0; i < 240 && this.repo.getMessage(chatId, m.key.id)?.media_status === "pending"; i++) {
         await new Promise((res) => setTimeout(res, 500));
       }
-      row = repo.getMessage(chatId, m.key.id);
+      row = this.repo.getMessage(chatId, m.key.id);
     }
     if (row?.media_status === "pending") {
       await this.downloadMedia(chatId, m.key.id);
-      row = repo.getMessage(chatId, m.key.id);
+      row = this.repo.getMessage(chatId, m.key.id);
       if (row?.media_status !== "ready") {
-        logger.warn({ chatId, id: m.key.id }, "auto-remove: media not saved, leaving message on phone");
+        this.log.warn({ chatId, id: m.key.id }, "auto-remove: media not saved, leaving message on phone");
         return;
       }
     }
 
     if (row && row.media_status !== "none" && row.media_status !== "ready") {
-      logger.warn({ chatId, id: m.key.id }, "auto-remove: media not saved, leaving message on phone");
+      this.log.warn({ chatId, id: m.key.id }, "auto-remove: media not saved, leaving message on phone");
       return;
     }
 
@@ -830,13 +858,13 @@ class WhatsAppManager {
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
         await this.sendDeleteForMe(target);
-        const updated = repo.markRemovedFromPhone(chatId, m.key.id);
-        repo.bumpFiltered(senderPn, "removed_count");
+        const updated = this.repo.markRemovedFromPhone(chatId, m.key.id);
+        this.repo.bumpFiltered(senderPn, "removed_count");
         if (updated) this.emitMessage(chatId, m.key.id, false);
         this.scheduleDeleteRetries(target);
         return;
       } catch (e) {
-        logger.warn({ err: (e as Error).message, attempt }, "auto-remove: delete-for-me failed");
+        this.log.warn({ err: (e as Error).message, attempt }, "auto-remove: delete-for-me failed");
         await new Promise((r) => setTimeout(r, 2000 * (attempt + 1)));
       }
     }
@@ -851,7 +879,7 @@ class WhatsAppManager {
     const n = jidNormalizedUser(remoteJid);
     if (isLidUser(n)) return n;
     if (alt && isLidUser(alt)) return jidNormalizedUser(alt);
-    return repo.lidForPn(n) || n;
+    return this.repo.lidForPn(n) || n;
   }
 
   private async sendDeleteForMe(t: DeleteForMeTarget) {
@@ -868,7 +896,7 @@ class WhatsAppManager {
       apiVersion: 3,
       operation: proto.SyncdMutation.SyncdOperation.SET,
     });
-    console.info("[filter] delete-for-me sent", {
+    console.info(`[${this.id}] [filter] delete-for-me sent`, {
       chat: t.jid.split("@")[1],
       fromMe: t.fromMe,
       participant: t.participant === "0" ? null : t.participant.split("@")[1],
@@ -885,7 +913,7 @@ class WhatsAppManager {
     for (const delay of DELETE_RETRY_DELAYS_MS) {
       setTimeout(() => {
         if (this.state.status !== "open") return; // the reconnect sweep covers it
-        this.sendDeleteForMe(t).catch((e) => logger.warn({ err: (e as Error).message }, "auto-remove: retry failed"));
+        this.sendDeleteForMe(t).catch((e) => this.log.warn({ err: (e as Error).message }, "auto-remove: retry failed"));
       }, delay).unref?.();
     }
   }
@@ -893,18 +921,18 @@ class WhatsAppManager {
   /** After (re)connecting, re-send delete-for-me for recently removed messages: timers don't survive restarts. */
   private async resendRecentDeletes() {
     if (!this.filtered.size) return;
-    const rows = repo.recentlyRemovedFromPhone(Math.floor(Date.now() / 1000) - DELETE_RESEND_WINDOW_S, DELETE_RESEND_MAX);
+    const rows = this.repo.recentlyRemovedFromPhone(Math.floor(Date.now() / 1000) - DELETE_RESEND_WINDOW_S, DELETE_RESEND_MAX);
     for (const r of rows) {
       if (this.state.status !== "open") return;
       const group = isJidGroup(r.chat_id);
-      const participant = group && r.sender_jid ? repo.lidForPn(r.sender_jid) || r.sender_jid : "0";
+      const participant = group && r.sender_jid ? this.repo.lidForPn(r.sender_jid) || r.sender_jid : "0";
       try {
         await this.sendDeleteForMe({ jid: this.deleteIndexJid(r.chat_id), id: r.id, fromMe: !!r.from_me, participant, ts: r.ts });
       } catch (e) {
-        logger.warn({ err: (e as Error).message }, "auto-remove: resend after reconnect failed");
+        this.log.warn({ err: (e as Error).message }, "auto-remove: resend after reconnect failed");
       }
     }
-    if (rows.length) console.info("[filter] re-sent delete-for-me after reconnect", { count: rows.length });
+    if (rows.length) console.info(`[${this.id}] [filter] re-sent delete-for-me after reconnect`, { count: rows.length });
   }
 
   /**
@@ -912,22 +940,22 @@ class WhatsAppManager {
    * generic text, never the received message, and at most once per cooldown.
    */
   private async sendFilterAlert() {
-    const a = repo.getAlertSettings();
+    const a = this.repo.getAlertSettings();
     if (!a.phone) return;
     if (Date.now() - this.lastAlertAt < a.cooldownMin * 60_000) return;
     this.lastAlertAt = Date.now();
     try {
       await this.sendText(a.phone, a.text);
-      console.info("[filter] alert sent");
+      console.info(`[${this.id}] [filter] alert sent`);
     } catch (e) {
       this.lastAlertAt = 0;
-      logger.warn({ err: (e as Error).message }, "filter alert failed");
+      this.log.warn({ err: (e as Error).message }, "filter alert failed");
     }
   }
 
   /** Settings > Alerts "Send test": sends the alert text now, ignoring the cooldown. */
   async sendTestAlert() {
-    const a = repo.getAlertSettings();
+    const a = this.repo.getAlertSettings();
     if (!a.phone) throw new Error("Set an alert number first");
     await this.sendText(a.phone, a.text);
   }
@@ -978,7 +1006,7 @@ class WhatsAppManager {
   ) {
     let quoted: WAMessage | undefined;
     if (quotedId) {
-      const q = repo.getMessage(chatId, quotedId);
+      const q = this.repo.getMessage(chatId, quotedId);
       if (q) {
         quoted = q.raw
           ? (proto.WebMessageInfo.decode(q.raw) as WAMessage)
@@ -1007,7 +1035,7 @@ class WhatsAppManager {
   /** Ask the phone for messages older than the oldest one we have in this chat (on-demand history sync). */
   async fetchOlder(chatId: string, count = 50) {
     const sock = this.requireSock();
-    const oldest = db
+    const oldest = this.db
       .prepare("SELECT id, from_me, ts, sender_jid FROM messages WHERE chat_id = ? ORDER BY ts ASC LIMIT 1")
       .get(chatId) as { id: string; from_me: number; ts: number; sender_jid: string | null } | undefined;
     if (!oldest) throw new Error("No messages in this chat to anchor the request");
@@ -1024,24 +1052,24 @@ class WhatsAppManager {
    * seeing grey "delivered" ticks).
    */
   async markRead(chatId: string) {
-    repo.upsertChatMeta(chatId, { unread: 0 });
+    this.repo.upsertChatMeta(chatId, { unread: 0 });
     this.markChatsDirty();
     await this.sendReadReceipts(chatId);
   }
 
   /** Per-chat read receipts switch (Chat header). Turning it on sends receipts for the open chat now. */
   async setReadReceipts(chatId: string, on: boolean) {
-    repo.setReadReceipts(chatId, on);
+    this.repo.setReadReceipts(chatId, on);
     this.markChatsDirty();
     if (on) await this.sendReadReceipts(chatId);
   }
 
   private async sendReadReceipts(chatId: string) {
-    const chat = repo.getChat(chatId);
+    const chat = this.repo.getChat(chatId);
     if (!chat?.read_receipts) return;
     const sock = this.sock;
     if (!sock || this.state.status !== "open") return;
-    const rows = repo.pendingReceipts(chatId, chat.receipts_ts);
+    const rows = this.repo.pendingReceipts(chatId, chat.receipts_ts);
     if (!rows.length) return;
     const group = isJidGroup(chatId);
     try {
@@ -1050,15 +1078,15 @@ class WhatsAppManager {
       await sock.readMessages(
         rows.map((r) => ({ remoteJid: chatId, id: r.id, fromMe: false, participant: group ? r.sender_jid || undefined : undefined })),
       );
-      repo.setReceiptsTs(chatId, rows[rows.length - 1].ts);
+      this.repo.setReceiptsTs(chatId, rows[rows.length - 1].ts);
     } catch (e) {
-      logger.warn({ err: (e as Error).message, chatId }, "sending read receipts failed");
+      this.log.warn({ err: (e as Error).message, chatId }, "sending read receipts failed");
     }
   }
 
   async react(chatId: string, id: string, emoji: string) {
     const sock = this.requireSock();
-    const row = repo.getMessage(chatId, id);
+    const row = this.repo.getMessage(chatId, id);
     if (!row) throw new Error("message not found");
     await sock.sendMessage(chatId, {
       react: {
@@ -1066,12 +1094,12 @@ class WhatsAppManager {
         key: { remoteJid: chatId, id, fromMe: !!row.from_me, participant: row.from_me ? undefined : row.sender_jid || undefined },
       },
     });
-    const updated = repo.applyReaction(chatId, id, "me", emoji);
+    const updated = this.repo.applyReaction(chatId, id, "me", emoji);
     if (updated) this.emitMessage(chatId, id, false);
   }
 
   async avatarUrl(jid: string): Promise<string | null> {
-    const chat = repo.getChat(jid);
+    const chat = this.repo.getChat(jid);
     const day = 24 * 3600;
     const now = Math.floor(Date.now() / 1000);
     if (chat && chat.avatar_checked_at > now - day) return chat.avatar_url;
@@ -1082,11 +1110,13 @@ class WhatsAppManager {
     } catch {
       url = null;
     }
-    if (chat) db.prepare("UPDATE chats SET avatar_url = ?, avatar_checked_at = ? WHERE id = ?").run(url, now, jid);
+    if (chat) this.db.prepare("UPDATE chats SET avatar_url = ?, avatar_checked_at = ? WHERE id = ?").run(url, now, jid);
     return url;
   }
 
   async logout() {
+    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = null;
     const sock = this.sock;
     this.generation++; // detach listeners from the old socket
     this.sock = null;
@@ -1113,19 +1143,7 @@ class WhatsAppManager {
 
   private async wipeAuth() {
     this.clearMediaQueue();
-    await fs.promises.rm(AUTH_DIR, { recursive: true, force: true });
+    await fs.promises.rm(this.authDir, { recursive: true, force: true });
   }
 }
 
-declare global {
-  var __waManager: WhatsAppManager | undefined;
-}
-
-export const wa: WhatsAppManager = globalThis.__waManager ?? (globalThis.__waManager = new WhatsAppManager());
-
-/** Auto-resume a paired session when the server boots. */
-export function bootWhatsApp() {
-  if (wa.hasSession() && wa.state.status === "disconnected") {
-    void wa.start().catch((e) => console.error("[wa] start failed", e));
-  }
-}

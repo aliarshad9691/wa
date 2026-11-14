@@ -1,5 +1,7 @@
+import { withAccount } from "./account";
+
 export function mediaUrl(chatId: string, id: string, download = false) {
-  return `/api/media/${encodeURIComponent(chatId)}/${encodeURIComponent(id)}${download ? "?download=1" : ""}`;
+  return withAccount(`/api/media/${encodeURIComponent(chatId)}/${encodeURIComponent(id)}${download ? "?download=1" : ""}`);
 }
 
 export function timeOf(ts: number) {

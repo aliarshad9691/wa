@@ -6,6 +6,8 @@ import Sidebar from "./Sidebar";
 import ChatPane from "./ChatPane";
 import SettingsPanel from "./SettingsPanel";
 import EmptyPane from "./EmptyPane";
+import AccountRail from "./AccountRail";
+import { setAccountScope, withAccount, type AccountSummary } from "./account";
 
 export type FocusTarget = { chatId: string; messageId: string; ts: number } | null;
 
@@ -19,7 +21,18 @@ const INITIAL_STATE: WAState = {
   media: { queued: 0, active: 0, failed: 0 },
 };
 
-export default function ChatApp({ user }: { user: SessionUser }) {
+export default function ChatApp({
+  user,
+  accountId,
+  initialAccounts,
+}: {
+  user: SessionUser;
+  accountId: string;
+  initialAccounts: AccountSummary[];
+}) {
+  // Every API call from here down names this account (see ./account).
+  setAccountScope(accountId);
+  const [accounts, setAccounts] = useState<AccountSummary[]>(initialAccounts);
   const [wa, setWa] = useState<WAState>(INITIAL_STATE);
   const [chats, setChats] = useState<ChatItem[]>([]);
   const [chatsLoaded, setChatsLoaded] = useState(false);
@@ -87,15 +100,21 @@ export default function ChatApp({ user }: { user: SessionUser }) {
     return () => clearTimeout(t);
   }, [loadChats]);
 
+  const loadAccounts = useCallback(async () => {
+    const r = await fetch("/api/accounts", { cache: "no-store" }).catch(() => null);
+    if (r?.ok) setAccounts(((await r.json()) as { accounts: AccountSummary[] }).accounts);
+  }, []);
+
   // Live updates via server-sent events.
   useEffect(() => {
     let es: EventSource | null = null;
     let retry: ReturnType<typeof setTimeout> | null = null;
     const connect = () => {
-      es = new EventSource("/api/events");
+      es = new EventSource(withAccount("/api/events"));
       es.addEventListener("open", () => setOnline(true));
       es.addEventListener("state", (e) => setWa(JSON.parse((e as MessageEvent).data)));
       es.addEventListener("chats", () => scheduleChats());
+      es.addEventListener("accounts", () => void loadAccounts());
       es.addEventListener("history", (e) => {
         events.dispatchEvent(new CustomEvent("history", { detail: JSON.parse((e as MessageEvent).data) }));
       });
@@ -119,7 +138,7 @@ export default function ChatApp({ user }: { user: SessionUser }) {
       es?.close();
       if (retry) clearTimeout(retry);
     };
-  }, [events, scheduleChats]);
+  }, [events, scheduleChats, loadAccounts]);
 
   // First visit with nothing linked: go straight to the QR screen.
   const [autoSettingsDone, setAutoSettingsDone] = useState(false);
@@ -153,6 +172,8 @@ export default function ChatApp({ user }: { user: SessionUser }) {
 
   // Keep the URL hash in sync so reloads return to the same chat.
   useEffect(() => {
+    // ?a=<account> (after adding/switching) has done its job; the cookie remembers the choice.
+    if (new URLSearchParams(window.location.search).has("a")) history.replaceState(history.state, "", window.location.pathname + window.location.hash);
     // A fresh page starts with hidden chats locked, so a link or reload can't open one; only
     // typing the secret into search unlocks them again. Open the linked chat after the lock lands.
     const fromHash = decodeURIComponent(window.location.hash.slice(1));
@@ -192,17 +213,25 @@ export default function ChatApp({ user }: { user: SessionUser }) {
     hadUnlock.current = needUnlock;
   }, [needUnlock]);
 
+  const currentAccount = accounts.find((a) => a.id === accountId);
   const activeChat = chats.find((c) => c.id === activeId) || (activeId ? hiddenSeen.get(activeId) : undefined) || null;
 
   return (
-    <div className="app-shell flex w-full justify-center">
+    <div className="app-shell flex w-full">
+      <div className="flex min-w-0 flex-1 justify-center">
       <div className="relative flex h-full w-full max-w-[1600px] overflow-hidden bg-panel shadow-[0_6px_18px_rgba(11,20,26,0.05)]">
         {/* Left column */}
         <aside
           className={`flex h-full w-full flex-col border-r border-line bg-panel md:w-[40%] md:max-w-[460px] md:min-w-[320px] lg:w-[30%]`}
         >
           {view === "settings" ? (
-            <SettingsPanel user={user} wa={wa} onBack={() => setView("chats")} />
+            <SettingsPanel
+              user={user}
+              wa={wa}
+              account={currentAccount ?? null}
+              accountCount={accounts.length}
+              onBack={() => setView("chats")}
+            />
           ) : (
             <Sidebar
               chats={chats}
@@ -242,6 +271,13 @@ export default function ChatApp({ user }: { user: SessionUser }) {
           )}
         </main>
       </div>
+      </div>
+      {/* Account switcher, on the right edge. Phones: hidden while a chat fills the screen. */}
+      <AccountRail
+        accounts={accounts}
+        currentId={accountId}
+        className={activeId && view === "chats" ? "hidden md:flex" : ""}
+      />
     </div>
   );
 }

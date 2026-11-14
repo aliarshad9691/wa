@@ -1,11 +1,12 @@
 "use client";
 import { useState } from "react";
 import { Users, User } from "lucide-react";
+import { withAccount } from "./account";
 
 const failed = new Set<string>();
 
 export default function Avatar({ id, isGroup, size = 49, src }: { id?: string; isGroup?: boolean; size?: number; src?: string | null }) {
-  const url = src || (id ? `/api/avatar/${encodeURIComponent(id)}` : null);
+  const url = src || (id ? withAccount(`/api/avatar/${encodeURIComponent(id)}`) : null);
   const [broken, setBroken] = useState(() => (url ? failed.has(url) : true));
   const icon = Math.round(size * 0.55);
   return (

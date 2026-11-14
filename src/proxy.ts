@@ -6,7 +6,17 @@ const PUBLIC = ["/login", "/api/auth"];
 export default auth((req) => {
   const { pathname } = req.nextUrl;
   if (PUBLIC.some((p) => pathname === p || pathname.startsWith(p + "/"))) return NextResponse.next();
-  if (req.auth?.user) return NextResponse.next();
+  if (req.auth?.user) {
+    // EventSource, <img> and <video> can't send headers: they name their WhatsApp account as ?a=<id>,
+    // which becomes the same header fetch() calls send (see lib/session.ts).
+    const account = req.nextUrl.searchParams.get("a");
+    if (account && pathname.startsWith("/api/") && !req.headers.has("x-wa-account")) {
+      const headers = new Headers(req.headers);
+      headers.set("x-wa-account", account);
+      return NextResponse.next({ request: { headers } });
+    }
+    return NextResponse.next();
+  }
   console.warn("[auth] proxy denied", {
     path: pathname,
     hasSessionCookie: req.cookies.getAll().some((c) => c.name.includes("session-token")),
