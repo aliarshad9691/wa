@@ -563,19 +563,19 @@ export default function ChatPane({
                     {askingPhone ? "Requesting older messages from phone…" : "Load older messages from phone"}
                   </button>
                 )}
-                <span className="rounded-lg bg-[#ffeecd] px-3 py-1.5 text-center text-[12.5px] text-[#54656f] dark:bg-[#182229] dark:text-[#ffd279]">
-                  {onlyDeleted
-                    ? deletedCount
-                      ? "Showing only messages that were deleted on WhatsApp."
-                      : "No deleted messages in this chat."
-                    : viewTtl != null && revealAll
-                      ? "Showing the full history, including hidden messages. They are hidden again when you close this chat."
-                      : viewTtl != null
-                      ? shown.length
-                        ? `Messages are hidden ${ttlLabel(viewTtl)} after you've seen them. They stay saved on your server.`
-                        : `No new messages. Messages are hidden ${ttlLabel(viewTtl)} after you've seen them and stay saved on your server.`
-                      : "Messages are archived on your server. Deleted messages stay visible and are highlighted."}
-                </span>
+                {(onlyDeleted || viewTtl == null || revealAll || !shown.length) && (
+                  <span className="rounded-lg bg-[#ffeecd] px-3 py-1.5 text-center text-[12.5px] text-[#54656f] dark:bg-[#182229] dark:text-[#ffd279]">
+                    {onlyDeleted
+                      ? deletedCount
+                        ? "Showing only messages that were deleted on WhatsApp."
+                        : "No deleted messages in this chat."
+                      : viewTtl != null && revealAll
+                        ? "Showing the full history, including hidden messages. They are hidden again when you close this chat."
+                        : viewTtl != null
+                          ? "No new messages."
+                          : "Messages are archived on your server. Deleted messages stay visible and are highlighted."}
+                  </span>
+                )}
               </div>
             )}
             {shown.map((m, i) => {
@@ -659,9 +659,4 @@ export default function ChatPane({
       {viewer && <MediaViewer m={viewer} title={viewer.fromMe ? "You" : viewer.senderName || name} onClose={() => setViewer(null)} />}
     </div>
   );
-}
-
-function ttlLabel(s: number) {
-  const m = Math.round(s / 60);
-  return s < 60 ? `${s} seconds` : m === 1 ? "1 minute" : `${m} minutes`;
 }
