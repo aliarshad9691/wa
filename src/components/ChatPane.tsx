@@ -434,7 +434,8 @@ export default function ChatPane({
   useEffect(() => {
     const root = scroller.current;
     if (viewTtl == null || !root) return;
-    const unseen = new Set(shown.filter((m) => m.viewedAt == null && m.type !== "system").map((m) => m.id));
+    // System lines (e.g. "call rejected automatically") disappear after being seen, like messages.
+    const unseen = new Set(shown.filter((m) => m.viewedAt == null).map((m) => m.id));
     if (!unseen.size) return;
     const onScreen = new Set<string>();
     const queue = new Set<string>();

@@ -127,6 +127,8 @@ const DELETE_RETRY_DELAYS_MS = [5_000, 10_000, 60_000, 30 * 60_000];
 const DELETE_RESEND_WINDOW_S = 35 * 60;
 /** Cap on deletes re-sent after a reconnect. */
 const DELETE_RESEND_MAX = 20;
+/** Wait this long after rejecting a call before clearing its traces, so the call has ended everywhere. */
+const CALL_TRACE_DELAY_MS = 3_000;
 
 /** What one WhatsApp account (one linked phone number) needs: its own database, settings and auth keys. */
 export interface AccountContext {
@@ -167,6 +169,8 @@ export class WhatsAppManager {
   private sentHere = new Set<string>();
   private lastAlertAt = 0;
   private rejectedCalls = new Set<string>();
+  /** Call ids whose call-history record from the phone has already been removed. */
+  private removedCallLogs = new Set<string>();
 
   constructor(ctx: AccountContext) {
     this.id = ctx.id;
@@ -246,7 +250,7 @@ export class WhatsAppManager {
     const browserName = process.env.WA_BROWSER || "Chrome";
     const sock = makeWASocket({
       ...(version ? { version } : {}),
-      logger: this.log,
+      logger: this.socketLogger(),
       auth: { creds: state.creds, keys: makeCacheableSignalKeyStore(state.keys, this.log) },
       browser: Browsers.macOS(browserName),
       syncFullHistory: SYNC_FULL_HISTORY,
@@ -794,6 +798,99 @@ export class WhatsAppManager {
     const row = this.repo.insertSystemMessage(pn, `call-${c.id}`, ts, `📵 ${c.isVideo ? "Video call" : "Voice call"} rejected automatically`);
     this.repo.touchChat(pn, ts, false);
     if (row) this.emitMessage(pn, row.id, true);
+    setTimeout(() => void this.clearCallTraces(c.id, c.from, pn, ts), CALL_TRACE_DELAY_MS).unref?.();
+  }
+
+  /**
+   * A rejected call still leaves a "missed call" line in the phone's chat and an entry in its Calls tab.
+   * Remove both, the way WhatsApp's own devices sync such deletes:
+   * - Calls tab: a "delete_individual_call_log" action for this caller and call id. If the phone also
+   *   syncs its own call record ("call_log"), onSyncAction removes that record as well.
+   * - Chat: a delete-for-me of the call line, which WhatsApp keys by the call id. The phone ignores it
+   *   when it keys the line differently; nothing else is affected.
+   * Neither is confirmed by WhatsApp, so failures are only logged.
+   */
+  private async clearCallTraces(callId: string, from: string, pn: string, ts: number) {
+    if (this.state.status !== "open" || !this.sock) return;
+    const caller = jidNormalizedUser(from);
+    const lid = isLidUser(caller) ? caller : this.repo.lidForPn(pn);
+    const peers = [...new Set([caller, lid, pn].filter((j): j is string => !!j))];
+    for (const peer of peers) {
+      try {
+        await this.sock.appPatch({
+          syncAction: { timestamp: Date.now(), deleteIndividualCallLog: { peerJid: peer, isIncoming: true } },
+          index: ["delete_individual_call_log", peer, callId, "0"],
+          type: "regular",
+          apiVersion: 1,
+          operation: proto.SyncdMutation.SyncdOperation.SET,
+        });
+        console.info(`[${this.id}] [filter] call log delete sent`, { peer: peer.split("@")[1] });
+      } catch (e) {
+        this.log.warn({ err: (e as Error).message }, "call log delete failed");
+      }
+    }
+    const target: DeleteForMeTarget = { jid: lid || pn, id: callId, fromMe: false, participant: "0", ts };
+    try {
+      await this.sendDeleteForMe(target);
+      this.scheduleDeleteRetries(target);
+    } catch (e) {
+      this.log.warn({ err: (e as Error).message }, "call line delete-for-me failed");
+    }
+  }
+
+  /**
+   * Baileys' logger, plus a hook for the app-state actions Baileys doesn't handle itself (it logs them at
+   * debug level as "unprocessable update"), so call-history records synced by the phone can be seen.
+   */
+  private socketLogger(): pino.Logger {
+    const base = this.log;
+    const wrapped = Object.create(base) as pino.Logger;
+    wrapped.debug = ((obj: unknown, ...rest: unknown[]) => {
+      if (rest[0] === "unprocessable update") {
+        try {
+          this.onSyncAction((obj as { syncAction?: { index?: unknown; syncAction?: { value?: proto.ISyncActionValue | null } } })?.syncAction);
+        } catch (e) {
+          this.log.warn({ err: (e as Error).message }, "sync action hook failed");
+        }
+      }
+      return (base.debug as (...a: unknown[]) => void).apply(base, [obj, ...rest]);
+    }) as pino.LogFn;
+    return wrapped;
+  }
+
+  /**
+   * The phone's call-history record ("call_log", keyed [caller, call id, from me]) for a call this app
+   * rejected (its "rejected automatically" line is in the chat): remove it, using the exact key the phone
+   * used. Only records Baileys has stored are removed, so the app-state hash stays consistent.
+   */
+  private onSyncAction(m: { index?: unknown; syncAction?: { value?: proto.ISyncActionValue | null } } | undefined) {
+    const index = m?.index;
+    if (!Array.isArray(index) || (index[0] !== "call_log" && index[0] !== "delete_individual_call_log")) return;
+    const [action, peer, callId, dir] = index as string[];
+    if (!peer || !callId || !this.filtered.size) return;
+    void (async () => {
+      const pn = await this.toPn(peer, null);
+      if (!pn || !this.filtered.has(pn)) return;
+      const record = m?.syncAction?.value?.callLogAction;
+      console.info(`[${this.id}] [filter] call history sync`, { action, peer: peer.split("@")[1], incoming: dir === "0", record: !!record });
+      if (action !== "call_log" || dir !== "0" || !record || this.removedCallLogs.has(callId)) return;
+      if (!this.repo.getMessage(pn, `call-${callId}`)) return; // not a call this app rejected
+      this.removedCallLogs.add(callId);
+      await new Promise((r) => setTimeout(r, 1000)); // let Baileys store the record first
+      try {
+        await this.sock?.appPatch({
+          syncAction: { timestamp: Date.now(), callLogAction: record },
+          index: index as string[],
+          type: "regular",
+          apiVersion: 1,
+          operation: proto.SyncdMutation.SyncdOperation.REMOVE,
+        });
+        console.info(`[${this.id}] [filter] call history record removed`, { peer: peer.split("@")[1] });
+      } catch (e) {
+        this.removedCallLogs.delete(callId);
+        this.log.warn({ err: (e as Error).message }, "call history remove failed");
+      }
+    })();
   }
 
   /**

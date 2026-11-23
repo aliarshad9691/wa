@@ -87,7 +87,7 @@ function MessageBubbleImpl({ m, isGroup, first, highlighted, onReply, onReact, o
 
   if (m.type === "system") {
     return (
-      <div className="my-2 flex justify-center px-[9%]">
+      <div id={`msg-${m.id}`} className="my-2 flex justify-center px-[9%]">
         <span className="bubble rounded-lg bg-system px-3 py-1.5 text-center text-[12.5px] text-muted">{m.text}</span>
       </div>
     );
